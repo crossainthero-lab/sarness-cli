@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+!.env.sample
+.sarness/
+*.sarness-token
+secrets.json
