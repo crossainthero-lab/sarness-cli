@@ -17,8 +17,8 @@ from typing import Any, Callable
 
 from . import policy
 
-MAX_WRITE = 120_000          # chars in one write_file call (a soft guide of ~8k is given to the model)
-MAX_APPEND = 12_000
+MAX_WRITE = 250_000          # chars in one write_file call that arrived intact (the model is told a much smaller chunk size)
+MAX_APPEND = 250_000
 IGNORE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", ".pytest_cache", ".mypy_cache"}
 PLACEHOLDER = re.compile(
     r"(?im)^\s*(?:#|//|/\*|<!--|--)?\s*\.\.\.\s*(?:rest|remaining|existing|other|previous|unchanged|same)\b.*$"
@@ -56,7 +56,7 @@ TOOLS: list[dict[str, Any]] = [
     _tool("search", "Regex search across files (respects .gitignore in normal modes; includes protected/ignored files in bypass). Bounded results.", ["pattern"],
           pattern=S("Python regular expression"), path=S("Relative folder or file (default .)")),
     _tool("find_files", "Find files by glob pattern, e.g. '*.py' or 'src/**/test_*.py'.", ["pattern"], pattern=S("Glob pattern")),
-    _tool("write_file", "Create or replace a whole file. Keep each call under ~8000 characters; for larger files write the first part "
+    _tool("write_file", "Create or replace a whole file. Keep each call to a few thousand characters (the system prompt gives the exact limit); for larger files write the first part "
           "then add the rest with append_file. Never use placeholders such as '... rest unchanged'.", ["path", "content"],
           path=S("Relative path"), content=S("Complete contents of this file (or its first part)")),
     _tool("append_file", "Append the next chunk to a file. Only applies if the file's current length equals expected_length, so a "
@@ -389,7 +389,7 @@ class Workspace:
         p = self.resolve(a["path"], write=True)
         content = a["content"]
         if len(content) > MAX_WRITE:
-            raise ValueError(f"Content is {len(content)} characters; write at most ~8000 per call, then use append_file for the rest")
+            raise ValueError(f"Content is {len(content)} characters; write the first part (a few thousand characters), then use append_file for the rest")
         self._check_placeholders(content)
         old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
         if old == content:

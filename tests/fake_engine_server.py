@@ -127,11 +127,20 @@ class FakeEngineServer:
 
                 outer.completions.append(body)
                 events = outer.turns.pop(0)
+                if events == "http500":
+                    return self._json({"detail": "boom"}, 500)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 for ev in events:
-                    self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
+                    if ev == "DROP":              # server vanishes mid-stream: no `done` event, connection closed
+                        self.wfile.flush()
+                        self.connection.shutdown(2)
+                        return
+                    if isinstance(ev, str):       # raw (possibly corrupt) SSE payload
+                        self.wfile.write(("data: " + ev + "\n\n").encode())
+                    else:
+                        self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
                     self.wfile.flush()
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)

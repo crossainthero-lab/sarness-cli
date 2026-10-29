@@ -20,6 +20,25 @@ def _round_end(h: list[dict[str, Any]], start: int) -> int:
     return end
 
 
+def shrink_call_args(call: dict[str, Any], limit: int = 400) -> None:
+    """Old write_file/append_file/edit_file calls carry whole files in their arguments. Once applied they only
+    need to say what was done: long string values become a short marker, and the arguments stay valid JSON."""
+    fn = call.get("function") or {}
+    raw = fn.get("arguments")
+    if not isinstance(raw, str) or len(raw) <= limit * 2:
+        return
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        fn["arguments"] = json.dumps({"_omitted": f"{len(raw)} chars of malformed arguments"})
+        return
+    if isinstance(args, dict):
+        for k, v in list(args.items()):
+            if isinstance(v, str) and len(v) > limit:
+                args[k] = f"{v[:limit // 4]} ...[{len(v) - limit // 4} more chars omitted from history; already applied]"
+        fn["arguments"] = json.dumps(args, ensure_ascii=False)
+
+
 def repaired_history(history: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
     """Model-visible view within `budget` characters: system + first request are kept, old tool output is
     shortened first, then whole completed rounds are dropped. The input list is not modified."""
@@ -28,6 +47,10 @@ def repaired_history(history: list[dict[str, Any]], budget: int) -> list[dict[st
         raise ValueError("Missing system message")
     size = lambda: len(json.dumps(h, ensure_ascii=False))  # noqa: E731
     protected = max(2, len(h) - 10)
+    for m in h[2:]:                    # every call in a stored history has run: its file contents are dead weight in the prompt
+        if m.get("role") == "assistant":
+            for c in m.get("tool_calls") or []:
+                shrink_call_args(c)
     for i in range(2, protected):
         if size() <= budget:
             break
