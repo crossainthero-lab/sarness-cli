@@ -28,6 +28,8 @@ def command():
 
 
 def configure(server):
+    if str(config.config_dir()) != os.environ.get("SARNESS_TEST_CONFIG_ROOT"):
+        raise RuntimeError("Permission CLI tests require the isolated_home fixture before writing configuration")
     cfg = config.load_config()
     cfg["profiles"]["fake"] = {"transport": "direct", "url": server.url, "model": "local:coder@Q4"}
     cfg["settings"].update(server="fake", permissions="ask", effort="low")
@@ -44,6 +46,7 @@ class Terminal:
         os.close(slave)
         self.output = ""
         self.offset = 0
+        self.last_marker = None
 
     def until(self, marker):
         deadline = time.monotonic() + 20
@@ -59,8 +62,15 @@ class Terminal:
                     pytest.fail(f"CLI exited waiting for {marker}: {self.output[-6000:]}")
                 self.output += chunk.decode("utf-8", "replace")
         self.offset = self.output.index(marker, self.offset) + len(marker)
+        self.last_marker = marker
 
     def send(self, text):
+        if self.last_marker == "❯":
+            deadline = time.monotonic() + 5
+            while termios.tcgetattr(self.master)[3] & termios.ICANON:
+                if time.monotonic() > deadline:
+                    pytest.fail("CLI prompt rendered but terminal input is not ready")
+                time.sleep(0.01)
         os.write(self.master, (text + "\r").encode())
 
     def close(self):
@@ -168,14 +178,17 @@ def test_repl_inventory_boundaries_failures_new_and_resume(tmp_path):
     try:
         terminal.until('❯')
         terminal.send('/permissions bypass')  # already enabled: no second confirmation
+        terminal.until('permissions → bypass')
         terminal.until('❯')
         terminal.send('inventory')
         terminal.until('INVENTORY_COMPLETE')
         terminal.until('❯')
         sid = next((config.state_dir() / 'sessions').glob('*.json')).stem
         terminal.send('/new')
+        terminal.until('Started new session')
         terminal.until('❯')
         terminal.send('/resume ' + sid)
+        terminal.until('Send an instruction to continue.')
         terminal.until('❯')
         terminal.send('edit again')
         terminal.until('RESTORED_COMPLETE')

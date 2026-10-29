@@ -8,6 +8,7 @@ import pytest
 def isolated_home(monkeypatch, tmp_path):
     """Every test gets its own config/state dirs: nothing touches the real ~/.config or ~/.local."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("SARNESS_TEST_CONFIG_ROOT", str(tmp_path / "cfg" / "sarness-cli"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
