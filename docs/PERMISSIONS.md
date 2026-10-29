@@ -1,43 +1,51 @@
-# Permission policy and bypass verification
+# Permission policy and runtime acceptance
 
-`--dangerously-skip-permissions` selects a live, workspace-scoped `EffectivePermissions` policy for the process. It is not saved as a default or recovered from untrusted session content. Pass the flag again on a later launch or resume.
+`--dangerously-skip-permissions` selects a workspace-scoped `EffectivePermissions` policy. Every tool dispatcher, delegate and nested CLI uses that policy. BYPASS tool decisions are **allow or deny**, never interactive approval. Normal modes retain their approval behavior.
 
-## Findings
+## Actual failure found in 0.2.1
 
-The original argument parser and top-level workspace already retained bypass for ordinary commands. A baseline live coding task in that path completed without prompting; the reported interruption could not be reproduced on that direct path. The installed executable was an editable pipx installation pointing to the checkout, rather than a stale wheel.
+A live PTY running the installed pipx executable against Spark Engine 0.4.0 and Qwen3.6 35B-A3B MXFP4_MOE reproduced:
 
-The reproducible propagation failure was downstream: `Workspace` defaulted silently to `ask` without parent context, and the shell executor stripped every `SARNESS_*` variable. A nested `sarness run` therefore read the configured permission default again instead of inheriting the active session policy. There is no native subagent scheduler; delegated tools and nested CLI tasks are the available delegation paths.
-
-Authorization also lived in individual handlers, omitted some registered helpers, and happened after file contents were read for edit previews. The general policy had an allow fallback for unclassified tools. These gaps made enforcement and future delegation inconsistent.
-
-## Enforcement
-
-1. CLI parsing preserves the bypass flag before or after the `run`/`resume` subcommand.
-2. Launch resolves an effective policy after locating the restored workspace. The active launch flag takes precedence.
-3. The agent, toolbar, and every workspace executor use that same policy. New prompts, `/new`, and `/resume` retain it.
-4. Dispatch validates arguments and authorizes the tool before entering its handler. Bypass is evaluated before constructing an ordinary approval request.
-5. `Workspace.delegate()` shares policy and confirmation handling, confines children to the authorized workspace, and uses separate command logs. Nested execution also inherits the active policy through a scoped context variable.
-6. Shell commands receive `SARNESS_PERMISSION_CONTEXT` containing only the effective mode and authorized root. A nested CLI validates this context; it cannot implicitly expand to another workspace. Missing executor context and invalid inherited context produce explicit errors.
-7. Unknown tools fail closed. Normal Ask-mode approvals and edit previews remain. Sensitive file contents are not read just to render approval previews, and bulk searches filter escaping symlinks.
-8. Session JSON never restores permission authority. A fresh launch without the flag uses its current configured mode.
-
-Credential stores and catastrophic commands remain refused. Secret-looking files, Git internals, privilege escalation, system write targets, remote changes, publishing, and workspace boundaries remain explicitly gated. Model swaps and shared-engine memory checks retain their independent confirmations. Shell classification is heuristic, not an operating-system sandbox.
-
-## Verification, 2026-10-30
-
-The installed executable was rebuilt/reinstalled using `./install.sh` and resolved in a fresh login shell to `~/.local/bin/sarness` (pipx).
-
-A real interactive CLI session against a running Sarness Engine and Qwen3.6 35B-A3B completed a resumed coding task with reads, multiple exact edits, three test/build commands, file creation, and deletion. A second prompt in the same session created a virtual environment, installed a local wheel with pip, verified its import, and launched a nested `sarness run` **without** a bypass flag. The nested task wrote a file and ran the tests. All final commands exited zero; zero ordinary approval prompts appeared.
-
-Launch used:
-
-```sh
-sarness --dangerously-skip-permissions --resume SESSION_ID \
-  --model local:qwen3.6-35b-a3b@MXFP4_MOE --effort low
+```text
+permissions bypass
+▸ run_command find . -type f -not -path './.git/*' -not -path './.venv/*'
+┃ [HIGH] run_command: find . -type f -not -path './.git/*' -not -path './.venv/*'
+┃   why asked: Sensitive file or Git internals: `./.git/*`
+┃ Allow? [y]es / [N]o / [a]lways for this exact action:
 ```
 
-All **270 tests passed** against the installed CLI. Regression coverage includes real shell/file effects, builds, mode changes, scoped delegation, multiple interactive prompts, nested CLI execution, launch/resume precedence, missing/invalid context, normal approvals, and critical boundaries. The process tests use a scripted HTTP/SSE inference server while executing actual installed CLI processes and real tools. To run them against an installed executable:
+This was an executor approval, not a model question. The launch flag was intact. The shell classifier treated a search exclusion pattern as a filesystem operand, set `sensitive`, and `verdict_for_command()` returned `ask` before checking bypass. `Workspace._gate()` passed that decision to `Console.confirm()`.
+
+Both earlier changes left boundary approvals ahead of bypass. The central-policy regression tests even required bypass to ask for remote, privileged and sensitive actions. Live checks exercised simple commands that did not hit a false boundary. A banner-only PTY test could not detect this behavior. Propagation fixes were useful, but could not correct these verdicts.
+
+The installed local executable also pointed to an editable checkout in `Documents/Sarness-cli/cli`, separate from the canonical public checkout. Its permission implementation matched the release, so this was not the cause of the reproduced prompt. Installation must still be verified independently of a working tree.
+
+## Corrected execution contract
+
+1. CLI parsing preserves the launch flag before/after subcommands; restored workspaces are resolved before selecting the launch policy.
+2. `EffectivePermissions` is authoritative. Routine workspace reads, edits, writes, local shell commands, builds and tests are allowed in BYPASS. Protected boundaries return explicit denial, without invoking confirmation.
+3. Search-pattern arguments to find/rg/grep are distinguished from filesystem operands. Actual roots, sensitive operands, and find execution arguments are still checked. Shell classification remains heuristic, not an operating-system sandbox.
+4. Every registered tool is authorized before its handler reads or mutates anything. Unknown tools and missing/invalid executor context fail explicitly. A final policy invariant converts any future interactive verdict to denial in BYPASS.
+5. `Workspace.delegate()` shares the same policy object and confines children to the authorized root. Context variables cover synchronous nested dispatch; shell children receive a scoped `SARNESS_PERMISSION_CONTEXT`. Nested Sarness commands do not need another bypass flag.
+6. Tool failures reset dispatch context and do not alter permissions. Permission events record the actual mode, tool, verdict and reason in each session's `events.jsonl` without file contents or command arguments.
+7. Additional prompts, `/new`, and in-process `/resume` retain the active launch policy. Re-selecting an already active BYPASS mode needs no second typed confirmation. The terminal banner and status bar visibly show BYPASS.
+8. Saved conversation content cannot grant permission authority. A new process must opt in again with the flag; the displayed resume command now includes it automatically for BYPASS sessions. This preserves the existing rule that bypass is never a saved default.
+9. Credential stores and catastrophic commands remain denied in every mode. Secret-looking files, Git internals, privileged actions, remote changes/publishing and outside-workspace shell operands are denied in BYPASS and retain confirmation in ordinary modes. Model loading/switching and shared-engine memory consent remain independent resource controls.
+
+## Verification
+
+The regular suite runs actual file/shell tools and installed executable PTYs with a deterministic HTTP/SSE inference fixture. It covers root flag propagation, multi-tool tasks, filesystem edits, shell/build execution, delegated/nested CLI calls, resume, missing context, failures, explicit boundary denials, and actual normal-mode approvals:
 
 ```sh
 SARNESS_TEST_EXECUTABLE="$(command -v sarness)" python -m pytest tests -q
+python -m ruff check sarness_cli tests
 ```
+
+The separate live runner uses the existing configuration and REAL model, with no inference mocks or automatic approval answers in bypass:
+
+```sh
+python3 tests/live_permission_acceptance.py --output /tmp/sarness-live-local
+# Run the same command on Spark after installing the verified commit.
+```
+
+It captures complete PTY transcripts and a report in the output directory. It creates only an isolated temporary project and normal CLI session state. It creates multiple Python files, runs a deliberately failing test, fixes it on a later prompt, executes the program and tests/build again, reproduces the source-inventory trigger, creates/moves files, adds a follow-up file, resumes across processes, delegates to a nested installed CLI without a bypass flag, exercises `/new` and in-process resume, and verifies an actual normal-mode approval. Files and test results are checked independently of model claims. Any unexpected approval makes the live run fail.

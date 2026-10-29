@@ -138,10 +138,77 @@ def test_installed_boundary_denials_and_normal_approvals(tmp_path):
         assert result.returncode == 0, result.stderr
         results = [m["content"] for m in server.completions[1]["messages"] if m["role"] == "tool"]
         assert len(results) == 3 and all(r.startswith("DENIED") for r in results)
-        assert "approval needed" in result.stderr  # explicit external boundary
+        assert "approval needed" not in result.stderr  # bypass boundaries are explicit denials
         result = subprocess.run(command() + ["run", "check", "-C", str(tmp_path), "--mode", "ask"],
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode == 0 and "approval needed" in result.stderr
         assert not (tmp_path / "should-not-exist").exists()
     finally:
+        server.stop()
+
+
+def test_repl_inventory_boundaries_failures_new_and_resume(tmp_path):
+    root = tmp_path / 'project'
+    root.mkdir()
+    (root / '.git').mkdir()
+    server = FakeEngineServer([
+        [done(calls=[('run_command', {'command': "find . -type f -not -path './.git/*'"}),
+                     ('run_command', {'command': 'false'}),
+                     ('read_file', {'path': 'missing.txt'}),
+                     ('run_command', {'command': 'git push origin main'}),
+                     ('write_file', {'path': 'after.txt', 'content': 'survived'}),
+                     ('run_command', {'command': 'cat after.txt'})])],
+        [{'type': 'delta', 'content': 'INVENTORY_COMPLETE'}, done(content='INVENTORY_COMPLETE')],
+        [done(calls=[('edit_file', {'path': 'after.txt', 'old_string': 'survived', 'new_string': 'resumed'}),
+                     ('run_command', {'command': 'cat after.txt'})])],
+        [{'type': 'delta', 'content': 'RESTORED_COMPLETE'}, done(content='RESTORED_COMPLETE')],
+    ])
+    configure(server)
+    terminal = Terminal(root, '--dangerously-skip-permissions')
+    try:
+        terminal.until('❯')
+        terminal.send('/permissions bypass')  # already enabled: no second confirmation
+        terminal.until('❯')
+        terminal.send('inventory')
+        terminal.until('INVENTORY_COMPLETE')
+        terminal.until('❯')
+        sid = next((config.state_dir() / 'sessions').glob('*.json')).stem
+        terminal.send('/new')
+        terminal.until('❯')
+        terminal.send('/resume ' + sid)
+        terminal.until('❯')
+        terminal.send('edit again')
+        terminal.until('RESTORED_COMPLETE')
+        terminal.until('❯')
+        terminal.send('/exit')
+        terminal.proc.wait(timeout=5)
+        terminal.until('Resume: sarness')
+        assert 'Allow?' not in terminal.output and 'Approve?' not in terminal.output
+        assert 'Type \'bypass\'' not in terminal.output
+        assert 'approval needed' not in terminal.output
+        assert 'Refused in BYPASS' in terminal.output
+        assert (root / 'after.txt').read_text() == 'resumed'
+        assert 'BYPASS' in terminal.output
+    finally:
+        terminal.close()
+        server.stop()
+
+
+def test_normal_repl_really_prompts_before_writing(tmp_path):
+    server = FakeEngineServer([
+        [done(calls=[('write_file', {'path': 'normal.txt', 'content': 'approved'})])],
+        [{'type': 'delta', 'content': 'NORMAL_COMPLETE'}, done(content='NORMAL_COMPLETE')],
+    ])
+    configure(server)
+    terminal = Terminal(tmp_path, '--mode', 'ask')
+    try:
+        terminal.until('❯')
+        terminal.send('write the file')
+        terminal.until('Allow?')
+        assert not (tmp_path / 'normal.txt').exists()
+        terminal.send('y')
+        terminal.until('NORMAL_COMPLETE')
+        assert (tmp_path / 'normal.txt').read_text() == 'approved'
+    finally:
+        terminal.close()
         server.stop()

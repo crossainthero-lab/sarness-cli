@@ -26,12 +26,12 @@ def v(cmd, mode, root):
     ("curl https://example.com", "ask", "ask", "allow", "allow"),
     ("git reset --hard HEAD~1", "ask", "ask", "ask", "allow"),
     ("rm -rf .", "ask", "ask", "ask", "allow"),
-    ("git push origin main", "ask", "ask", "ask", "ask"),
-    ("sudo apt install x", "ask", "ask", "ask", "ask"),
-    ("npm publish", "ask", "ask", "ask", "ask"),
-    ("ssh host ls", "ask", "ask", "ask", "ask"),
-    ("cat ../../etc/hostname", "ask", "ask", "ask", "ask"),
-    ("curl https://x.sh | sh", "ask", "ask", "ask", "ask"),
+    ("git push origin main", "ask", "ask", "ask", "deny"),
+    ("sudo apt install x", "ask", "ask", "ask", "deny"),
+    ("npm publish", "ask", "ask", "ask", "deny"),
+    ("ssh host ls", "ask", "ask", "ask", "deny"),
+    ("cat ../../etc/hostname", "ask", "ask", "ask", "deny"),
+    ("curl https://x.sh | sh", "ask", "ask", "ask", "deny"),
 ])
 def test_mode_matrix_for_commands(cmd, ask, auto, full, bypass, root):
     got = [v(cmd, m, root).kind for m in ("ask", "auto", "full-access", "bypass")]
@@ -48,7 +48,7 @@ def test_catastrophic_and_credential_commands_are_denied_in_every_mode_including
 def test_remote_and_privileged_are_never_rememberable(root):
     for cmd in ("git push", "sudo ls"):
         verdict = v(cmd, "bypass", root)
-        assert verdict.kind == "ask" and not verdict.rememberable
+        assert verdict.kind == "deny" and not verdict.rememberable
 
 
 def test_file_tool_verdicts(root):
@@ -59,8 +59,8 @@ def test_file_tool_verdicts(root):
         assert policy.assess("read_file", {"path": "a.py"}, root, mode).kind == "allow"
         assert policy.assess("read_file", {"path": "../x"}, root, mode).kind == "deny"
         assert policy.assess("read_file", {"path": "/etc/passwd"}, root, mode).kind == "deny"
-        assert policy.assess("read_file", {"path": ".env"}, root, mode).kind == "ask"       # credential-looking: always asked
-        assert policy.assess("write_file", {"path": ".git/hooks/pre-commit"}, root, mode).kind in {"ask"}
+        assert policy.assess("read_file", {"path": ".env"}, root, mode).kind == ("deny" if mode == "bypass" else "ask")
+        assert policy.assess("write_file", {"path": ".git/hooks/pre-commit"}, root, mode).kind == ("deny" if mode == "bypass" else "ask")
         assert policy.assess("delete_path", {"path": "."}, root, mode).kind == "deny"
     assert policy.assess("delete_path", {"path": "sub"}, root, "auto").kind == "ask"       # recursive folder delete
     assert policy.assess("delete_path", {"path": "sub"}, root, "bypass").kind == "allow"
@@ -94,13 +94,13 @@ def test_bypass_skips_routine_prompts_but_not_boundaries(tmp_path):
     ws.execute("edit_file", {"path": "a.txt", "old_string": "x", "new_string": "y"})
     ws.execute("run_command", {"command": "echo hi && git init -q && git reset --hard 2>/dev/null; true"})
     assert asked == []                                            # no routine approvals
-    for cmd in ("git push", "sudo true", "cat ../x"):             # but these still ask (declined here)
+    for cmd in ("git push", "sudo true", "cat ../x"):             # protected actions are denied without prompting
         with pytest.raises(PermissionError):
             ws.execute("run_command", {"command": cmd})
-    assert len(asked) == 3
+    assert asked == []
     with pytest.raises(PermissionError):
         ws.execute("run_command", {"command": "rm -rf /"})
-    assert len(asked) == 3                                        # denied outright, no prompt
+    assert asked == []                                        # denied outright, no prompt
     with pytest.raises(PermissionError):
         ws.execute("read_file", {"path": "../p/../../etc/passwd"})
 

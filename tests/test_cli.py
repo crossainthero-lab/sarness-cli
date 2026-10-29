@@ -103,7 +103,8 @@ def test_bypass_skips_routine_prompts_but_keeps_boundaries(engine, project, caps
     assert "BYPASS PERMISSIONS" in err
     results = [m["content"] for m in srv.completions[1]["messages"] if m["role"] == "tool"]
     assert results[0].startswith("exit code:")                                 # routine + local-destructive ran with no prompt
-    assert results[1].startswith("DENIED") and "denied by user" in results[1]    # remote action asked (no tty -> declined)
+    assert results[1].startswith("DENIED") and "Refused in BYPASS" in results[1]
+    assert "approval needed" not in err
     assert results[2].startswith("DENIED") and "credential" in results[2]       # credential access refused outright
 
 

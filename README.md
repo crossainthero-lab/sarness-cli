@@ -130,8 +130,8 @@ influence a verdict by what it writes; approvals only come from your terminal.
 | ordinary commands (tests, builds, git local) | asks | ✔ | ✔ | ✔ |
 | dependency installs, network access | asks | asks | ✔ | ✔ |
 | local destructive (`git reset --hard`, `rm -rf .`, recursive folder delete) | asks | asks | asks | ✔ |
-| secret-looking files (`.env`, `*.pem`, …), `.git` internals | asks | asks | asks | asks |
-| outside the workspace · `sudo` · `git push` / `ssh` / publishing · `curl … \| sh` | asks | asks | asks | **asks** |
+| secret-looking files (`.env`, `*.pem`, …), `.git` internals | asks | asks | asks | **refused** |
+| outside the workspace · `sudo` · `git push` / `ssh` / publishing · `curl … \| sh` | asks | asks | asks | **refused** |
 | credential stores (`~/.ssh`, `~/.aws`, Sarness config) · `rm -rf /` `~` · `mkfs` · `dd of=/dev/…` · shutdown · fork bombs | **refused** | **refused** | **refused** | **refused** |
 
 * `--mode ask|auto|full-access`, `/permissions [mode]`. `/permissions X --save` stores ask/auto/full-access as the default.

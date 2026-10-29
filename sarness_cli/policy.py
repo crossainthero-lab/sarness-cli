@@ -10,7 +10,8 @@ so the command classifier is a conservative heuristic, not an OS sandbox (docume
   ordinary command   ask    ok        ok          ok
   install / network  ask   ask        ok          ok
   local destructive  ask   ask       ask          ok   (git reset --hard, rm -r <dir>, .git writes excepted)
-  outside workspace, credentials, privileged, remote/publish  ->  always asked (never "remembered"); catastrophic -> denied in every mode
+  outside workspace, sensitive, privileged, remote/publish -> ask normally, deny in bypass
+  credential stores and catastrophic commands -> denied in every mode
 """
 from __future__ import annotations
 
@@ -231,6 +232,41 @@ def _outside_target(word: str, root: Path) -> tuple[str | None, bool]:
     return w, cred
 
 
+def _path_arguments(prog: str, args: list[str]) -> list[str]:
+    """Separate search-pattern data from filesystem operands.
+
+    A find predicate or a grep/rg glob describes matching, not file access. In
+    particular, excluding .git must not be classified as reading .git. Keep
+    every other argument, including find's roots and any -exec command, so
+    actual sensitive operands still reach the boundary checks.
+    """
+    patterns = {
+        "find": {"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+                 "-regex", "-iregex", "-lname", "-ilname"},
+        "rg": {"-g", "--glob", "--iglob"},
+        "grep": {"--exclude", "--exclude-dir", "--include"},
+    }.get(prog, set())
+    operands = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--" or (prog == "find" and arg in {"-exec", "-execdir", "-ok", "-okdir"}):
+            operands.extend(args[i + 1:])
+            break
+        if arg in patterns and i + 1 < len(args):
+            i += 2
+            continue
+        if any(arg.startswith(p + "=") for p in patterns if p.startswith("--")):
+            i += 1
+            continue
+        if prog == "rg" and arg.startswith("-g") and len(arg) > 2:
+            i += 1
+            continue
+        operands.append(arg)
+        i += 1
+    return operands
+
+
 def classify_command(cmd: str, root: Path, _depth: int = 0) -> CmdFlags:
     f = CmdFlags()
     _classify_into(cmd, root, f, _depth)
@@ -349,7 +385,7 @@ def _classify_into(cmd: str, root: Path, f: CmdFlags, depth: int) -> None:
                 f.network = True
         prev_downloader = downloader
 
-        for a in args:
+        for a in _path_arguments(prog, args):
             # Credential filenames and system write targets remain boundaries in bypass.
             if is_sensitive_name(Path(a)) or touches_git_dir(Path(a)):
                 f.sensitive = f.sensitive or a
@@ -417,7 +453,12 @@ class EffectivePermissions:
     def assess(self, tool: str, args: dict[str, Any], workspace: Path) -> Verdict:
         if workspace != self.root and self.root not in workspace.parents:
             return Verdict.deny("Delegated workspace is outside the authorized workspace")
-        return assess(tool, args, workspace, self.mode)
+        verdict = assess(tool, args, workspace, self.mode)
+        # An executor never receives an interactive verdict in bypass, even if
+        # a future classifier adds a new approval branch.
+        if self.mode == "bypass" and verdict.kind == "ask":
+            return Verdict.deny(f"Refused in BYPASS: {verdict.reason}")
+        return verdict
 
     def environment(self) -> dict[str, str]:
         return {"SARNESS_PERMISSION_CONTEXT": json.dumps({"root": str(self.root), "mode": self.mode})}
@@ -447,6 +488,13 @@ class EffectivePermissions:
 ACTIVE_PERMISSIONS: ContextVar[EffectivePermissions | None] = ContextVar("sarness_permissions", default=None)
 
 
+def boundary(mode: str, risk: int, reason: str) -> Verdict:
+    """Protected actions require interactive consent normally and are refused in bypass."""
+    if mode == "bypass":
+        return Verdict.deny(f"Refused in BYPASS: {reason}")
+    return Verdict.ask(risk, reason, rememberable=False)
+
+
 def verdict_for_command(cmd: str, root: Path, mode: str) -> Verdict:
     if mode not in MODES:
         return Verdict.deny(f"Unknown permission mode {mode!r}")
@@ -456,13 +504,13 @@ def verdict_for_command(cmd: str, root: Path, mode: str) -> Verdict:
     if f.credential:
         return Verdict.deny(f"Refused: touches a credential store ({f.credential}). The agent never reads keys or tokens.")
     if f.sensitive:
-        return Verdict.ask(HIGH, f"Sensitive file or Git internals: `{f.sensitive}`", rememberable=False)
+        return boundary(mode, HIGH, f"Sensitive file or Git internals: `{f.sensitive}`")
     if f.privileged:
-        return Verdict.ask(CRITICAL, "Runs with elevated privileges or pipes downloaded code into a shell", rememberable=False)
+        return boundary(mode, CRITICAL, "Runs with elevated privileges or pipes downloaded code into a shell")
     if f.remote:
-        return Verdict.ask(HIGH, f"Remote/outward-facing action: {f.remote}", rememberable=False)
+        return boundary(mode, HIGH, f"Remote/outward-facing action: {f.remote}")
     if f.outside:
-        return Verdict.ask(HIGH, f"References `{f.outside}`, outside the workspace", rememberable=False)
+        return boundary(mode, HIGH, f"References `{f.outside}`, outside the workspace")
     if f.obfuscated and mode != "bypass":
         return Verdict.ask(HIGH, f"Hard to audit: {f.obfuscated}")
     if mode == "ask":
@@ -497,10 +545,9 @@ def verdict_for_path(root: Path, rel: str, access: str, mode: str, recursive_dir
     shown = str(real.relative_to(root)) if real != root else "."
     if is_sensitive_name(real.relative_to(root)):
         what = "its contents would be sent to the model server" if access == "read" else "may contain credentials"
-        return Verdict.ask(HIGH if access == "read" else MEDIUM, f"`{shown}` looks like a secret file; {what}", rememberable=False)
+        return boundary(mode, HIGH if access == "read" else MEDIUM, f"`{shown}` looks like a secret file; {what}")
     if touches_git_dir(real.relative_to(root)):  # .git/config can embed remote credentials
-        return Verdict.ask(HIGH, "Modifies Git's internal data (.git)" if access != "read" else "Reads Git internals (.git); use git_* tools instead",
-                           rememberable=False)
+        return boundary(mode, HIGH, "Modifies Git's internal data (.git)" if access != "read" else "Reads Git internals (.git); use git_* tools instead")
     if access == "read":
         return Verdict.allow()
     if mode == "ask":

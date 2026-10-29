@@ -105,7 +105,7 @@ def test_resume_uses_current_launch_policy_not_saved_messages(tmp_path):
         again.ws.execute("run_command", {"command": "echo ordinary"})
 
 
-@pytest.mark.parametrize("command,kind", [("cat ~/.ssh/id_ed25519", "deny"), ("rm -rf /", "deny"), ("mkfs.ext4 /dev/test", "deny"), ("sudo true", "ask"), ("git push origin main", "ask"), ("npm publish", "ask"), ("rm -f /usr/bin/example", "ask"), ("cat .env", "ask"), ("echo changed > /usr/share/example", "ask"), ("echo OK > /dev/null", "allow")])
+@pytest.mark.parametrize("command,kind", [("cat ~/.ssh/id_ed25519", "deny"), ("rm -rf /", "deny"), ("mkfs.ext4 /dev/test", "deny"), ("sudo true", "deny"), ("git push origin main", "deny"), ("npm publish", "deny"), ("rm -f /usr/bin/example", "deny"), ("cat .env", "deny"), ("echo changed > /usr/share/example", "deny"), ("echo OK > /dev/null", "allow")])
 def test_critical_shell_boundaries(command, kind, tmp_path):
     assert policy.verdict_for_command(command, tmp_path, "bypass").kind == kind
 
@@ -120,7 +120,7 @@ def test_sensitive_file_denied_before_read_or_preview(tmp_path, monkeypatch):
     for name, args in [("edit_file", {"path": ".env", "old_string": "PRIVATE", "new_string": "changed"}), ("write_file", {"path": ".env", "content": "changed"})]:
         with pytest.raises(PermissionError):
             ws.execute(name, args)
-    assert len(asked) == 2 and all("PRIVATE" not in m for m in asked)
+    assert asked == []
 
 
 def test_registry_has_no_allow_fallback(tmp_path):
@@ -163,3 +163,48 @@ def test_remembered_approvals_share_policy_but_not_relative_paths(tmp_path):
     parent.mode = "ask"
     child.execute("run_command", {"command": "true"})
     assert len(prompts) == 3
+
+
+@pytest.mark.parametrize('command', [
+    "find . -type f -not -path './.git/*' -not -path './.venv/*'",
+    "find . -path './.git' -prune -o -type f -print",
+    "find . -name '*.key' -print",
+    "rg --glob './.git/*' needle .",
+    "rg --glob=./.git/* needle .",
+    "rg -g./.git/* needle .",
+    "grep -r --exclude-dir=.git needle .",
+])
+def test_search_patterns_are_data_not_file_access(tmp_path, command):
+    assert policy.verdict_for_command(command, tmp_path, 'bypass').kind == 'allow'
+
+
+@pytest.mark.parametrize('command', [
+    "find .git -name '*.py'", "rg --glob '*.py' needle .git/config",
+    "find . -name '*.py' -exec cat .git/config \\;",
+    "rg -- --glob .git/config", "grep --exclude-dir=.git needle .env",
+])
+def test_pattern_options_never_hide_real_sensitive_operands(tmp_path, command):
+    assert policy.verdict_for_command(command, tmp_path, 'bypass').kind == 'deny'
+
+
+def test_bypass_invariant_rejects_future_interactive_verdict(tmp_path, monkeypatch):
+    ws = Workspace(tmp_path, 'bypass', no_prompt)
+    monkeypatch.setattr(policy, 'assess', lambda *a: policy.Verdict.ask(policy.HIGH, 'future boundary'))
+    with pytest.raises(PermissionError, match='Refused in BYPASS: future boundary'):
+        ws.execute('write_file', {'path': 'never', 'content': 'no'})
+    assert not (tmp_path / 'never').exists()
+
+
+def test_failure_does_not_drop_active_policy(tmp_path, monkeypatch):
+    ws = Workspace(tmp_path, 'bypass', no_prompt)
+    def failing(args):
+        assert policy.ACTIVE_PERMISSIONS.get() is ws.permissions
+        raise RuntimeError('failed helper')
+    monkeypatch.setattr(ws, '_t_git_status', failing)
+    with pytest.raises(RuntimeError, match='failed helper'):
+        ws.execute('git_status', {})
+    assert policy.ACTIVE_PERMISSIONS.get() is None
+    assert 'exit code: 1' in ws.execute('run_command', {'command': 'false'})
+    child = ws.delegate()
+    child.execute('write_file', {'path': 'after.txt', 'content': 'still bypass'})
+    assert 'exit code: 0' in ws.execute('run_command', {'command': 'cat after.txt'})

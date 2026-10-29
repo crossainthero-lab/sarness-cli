@@ -23,5 +23,7 @@ jobs:
         run: SARNESS_TEST_EXECUTABLE="$(command -v sarness)" python -m pytest tests -q
       - name: Check installer and build wheel
         run: |
+          python -m ruff check sarness_cli tests
+          python -m compileall -q sarness_cli tests
           bash -n install.sh
           python -m pip wheel . --no-deps --wheel-dir dist

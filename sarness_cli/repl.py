@@ -454,7 +454,8 @@ class Repl:
                 continue
             self.task(line)
 
-        c.err(c.st.dim(f"session {self.s.id} saved. Resume: sarness resume {self.s.name or self.s.id}"))
+        bypass_flag = " --dangerously-skip-permissions" if self.s.ws.mode == "bypass" else ""
+        c.err(c.st.dim(f"session {self.s.id} saved. Resume: sarness{bypass_flag} resume {self.s.name or self.s.id}"))
         return 0
 
     def task(self, prompt: str) -> None:
@@ -699,7 +700,7 @@ class Repl:
         if mode not in PERMISSION_MODES:
             raise ValueError(f"mode must be one of {', '.join(PERMISSION_MODES)}")
 
-        if mode == "bypass":
+        if mode == "bypass" and self.s.ws.mode != "bypass":
             c.err(warning_bypass(c.st))
             try:
                 if c.input_fn("Type 'bypass' to enable for THIS session only: ").strip() != "bypass":

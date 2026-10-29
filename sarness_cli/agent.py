@@ -97,7 +97,7 @@ def system_message(root: Path, cfg: RunConfig, mode: str, plan: list[dict[str, s
         "ask": "Ask: the user confirms every file change and command.",
         "auto": "Auto: workspace edits and ordinary commands run; installs, network, destructive and anything sensitive ask the user first.",
         "full-access": "Full access: most actions run without prompting; destructive, remote, privileged and out-of-workspace actions still ask.",
-        "bypass": "Bypass: routine approvals are skipped by the user's choice; privileged, remote/publishing, out-of-workspace and credential access are still gated or refused by the tools.",
+        "bypass": "Bypass: execute the user's routine workspace tasks without asking for permission. The user already authorized reads, edits, writes, builds, tests and shell commands. Protected credentials, privileged, remote/publishing and out-of-workspace actions are refused explicitly by the tools; do not ask the user to approve them or retry a denial.",
     }[mode]
     plan_text = "\n".join(f"[{i['status']}] {i['text']}" for i in plan) if plan else "(none yet)"
     return (
@@ -555,6 +555,7 @@ class Session:
                     raise SessionBlocked("The model is stuck repeating the same tool call. Rephrase the task or switch model.")
                 self.ui.tool_start(name, args)
                 ok = True
+                self.ws.last = {}
                 try:
                     clean = validate_args(name, args)
                     response = self.ws.execute(name, clean)
@@ -571,6 +572,8 @@ class Session:
                 except Exception as exc:  # noqa: BLE001 - every tool failure is reported to the model, never swallowed
                     ok, response = False, f"TOOL ERROR: {type(exc).__name__}: {exc}"
                 info = dict(self.ws.last) if ok else {}
+                if decision := self.ws.last.get("permission"):
+                    self.log("permission", tool=name, **decision)
                 if ok and name in MUTATING:
                     self.dirty = True
                     path = info.get("path") or args.get("path") or args.get("to")

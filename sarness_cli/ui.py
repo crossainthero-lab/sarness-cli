@@ -227,9 +227,9 @@ class Console:
 
 def warning_bypass(st: Style) -> str:
     return st.amber(st.bold("⚠ Bypass Permissions skips routine approvals (edits, ordinary commands, local destructive actions).")) + st.dim(
-        "\n  Still enforced: catastrophic commands refused, credential stores refused, privileged / remote / publishing / out-of-workspace actions ask.")
+        "\n  Protected credentials, catastrophic commands, privileged / remote / publishing / out-of-workspace actions are refused without prompting.")
 
 
 def banner_bypass(st: Style) -> str:
     return st.amber(st.bold("⚠ BYPASS PERMISSIONS is ON for this session: routine approvals are skipped.")) + st.dim(
-        "\n  Still enforced: catastrophic commands refused, credential stores refused, privileged / remote / publishing / out-of-workspace actions ask.")
+        "\n  Protected credentials, catastrophic commands, privileged / remote / publishing / out-of-workspace actions are refused without prompting.")

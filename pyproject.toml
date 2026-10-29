@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sarness-cli"
-version = "0.2.1"
+version = "0.2.2"
 description = "Terminal coding agent for Sarness Engine"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -19,7 +19,10 @@ include = ["sarness_cli*"]
 
 [project.optional-dependencies]
 keyring = ["secretstorage>=3.3"]
-dev = ["pytest>=8", "cryptography"]
+dev = ["pytest>=8", "cryptography", "ruff"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
 
 [project.urls]
 Homepage = "https://github.com/crossainthero-lab/sarness-cli"

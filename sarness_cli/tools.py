@@ -238,6 +238,7 @@ class Workspace:
 
     def _gate(self, name: str, args: dict[str, Any], detail: str, extra: str = "") -> None:
         verdict = self.permissions.assess(name, args, self.root)
+        self.last["permission"] = {"mode": self.mode, "verdict": verdict.kind, "reason": verdict.reason}
         if verdict.kind == "deny":
             raise PermissionError(verdict.reason)
         if verdict.kind == "allow":
