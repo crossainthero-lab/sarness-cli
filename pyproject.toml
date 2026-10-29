@@ -19,7 +19,7 @@ include = ["sarness_cli*"]
 
 [project.optional-dependencies]
 keyring = ["secretstorage>=3.3"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "cryptography"]
 
 [project.urls]
 Homepage = "https://github.com/crossainthero-lab/sarness-cli"
