@@ -142,6 +142,7 @@ def run_cli(exe, env, ws, args, out, timeout, sigint_after=None, proxy=None):
 
 
 def check(label, ok, detail=""):
+    ok = bool(ok)
     print(("PASS " if ok else "FAIL ") + label + (f"  [{detail}]" if detail else ""), flush=True)
     return ok
 
@@ -167,7 +168,7 @@ def scenario_natural(exe, workdir, upstream_cfg):
     trunc = [e for e in ev if e["event"] == "truncation"]
     f = ws / "sarness_big.py"
     ok = check("exit code 0 / session completed", rc == 0 and data["status"] == "completed", f"rc={rc} status={data['status']}")
-    ok &= check("file >= 33000 chars and compiles", f.exists() and f.stat().st_size >= 33000 and (py_compile.compile(str(f), doraise=True) or True), f"{f.stat().st_size if f.exists() else 0} bytes")
+    ok &= check("file >= 33000 chars and compiles", f.exists() and f.stat().st_size >= 33000 and bool(py_compile.compile(str(f), doraise=True)), f"{f.stat().st_size if f.exists() else 0} bytes")
     print(f"INFO truncation events: {len(trunc)}  recoveries={data.get('recoveries')}  chunk_limit={data.get('chunk_limit')}")
     return ok
 
