@@ -131,8 +131,9 @@ def sessions(env):
 def run_cli(exe, env, ws, args, out, timeout, sigint_after=None, proxy=None):
     cmd = [exe, "-C", str(ws), "run", "--dangerously-skip-permissions", "--verbose", *args]
     with open(out, "ab") as f:
-        f.write(f"\n$ {' '.join(cmd[:6])} ...\n".encode())
-        p = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+        f.write(f"\n$ {' '.join(cmd[:6])} ...\n".encode()); f.flush()
+        p = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))   # a backgrounded harness would otherwise pass SIG_IGN down
         start = time.time()
         sent = False
         while p.poll() is None:
@@ -180,6 +181,7 @@ def scenario_natural(exe, workdir, upstream_cfg):
 def scenario_injected(exe, workdir, upstream_cfg):
     print("\n=== scenario: multi-file project with injected failures + Ctrl-C + resume ===")
     ws = workdir / "ws-acceptance"; shutil.rmtree(ws, ignore_errors=True); ws.mkdir(parents=True)
+    (workdir / "acceptance.log").unlink(missing_ok=True)
     px = Proxy(upstream_cfg, {3: "drop", 5: "corrupt", 7: "length", 9: "http500"})
     env, _ = isolated_env(workdir, px.url)
     prompt = ("Build the Python package `schemra` in the workspace, as a real multi-file project:\n"
@@ -199,7 +201,7 @@ def scenario_injected(exe, workdir, upstream_cfg):
     msgs_before = len(d1["messages"])
     cmd = [exe, "-C", str(ws), "resume", "--dangerously-skip-permissions", "--max-steps", "120", sid, "Continue the task from the checkpoint; do not redo completed work."]
     with open(workdir / "acceptance.log", "ab") as f:
-        f.write(b"\n$ resume\n")
+        f.write(b"\n$ resume\n"); f.flush()
         rc2 = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, timeout=3600).returncode
     data = json.loads(sessions(env)[-1].read_text())
     ok &= check("resumed run finished / session completed", rc2 == 0 and data["status"] == "completed", f"rc={rc2} status={data['status']}")
