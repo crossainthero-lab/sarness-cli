@@ -50,10 +50,10 @@ S = lambda d: _prop("string", d)    # noqa: E731
 I = lambda d: _prop("integer", d)   # noqa: E731
 
 TOOLS: list[dict[str, Any]] = [
-    _tool("list_dir", "List files in a workspace directory.", [], path=S("Relative folder (default .)")),
+    _tool("list_dir", "List directory entries; bypass includes protected and ignored paths.", [], path=S("Folder (default .; absolute/outside paths supported in bypass)")),
     _tool("read_file", "Read a text file with line numbers. Use offset/limit for large files.", ["path"],
           path=S("Relative path"), offset=I("First line number (default 1)"), limit=I("Number of lines (default 150, max 400)")),
-    _tool("search", "Regex search across workspace files (respects .gitignore). Bounded results.", ["pattern"],
+    _tool("search", "Regex search across files (respects .gitignore in normal modes; includes protected/ignored files in bypass). Bounded results.", ["pattern"],
           pattern=S("Python regular expression"), path=S("Relative folder or file (default .)")),
     _tool("find_files", "Find files by glob pattern, e.g. '*.py' or 'src/**/test_*.py'.", ["pattern"], pattern=S("Glob pattern")),
     _tool("write_file", "Create or replace a whole file. Keep each call under ~8000 characters; for larger files write the first part "
@@ -65,10 +65,10 @@ TOOLS: list[dict[str, Any]] = [
     _tool("edit_file", "Replace an exact, unique substring of an existing file. Preferred for changes to existing files.",
           ["path", "old_string", "new_string"], path=S("Relative path"), old_string=S("Original text, occurring exactly once"),
           new_string=S("Replacement text"), replace_all=_prop("boolean", "Replace every occurrence instead of requiring uniqueness")),
-    _tool("delete_path", "Delete a file or an empty/regular folder inside the workspace.", ["path"], path=S("Relative path")),
-    _tool("move_path", "Move or rename a file or folder inside the workspace.", ["from", "to"], **{"from": S("Source"), "to": S("Destination")}),
+    _tool("delete_path", "Delete a file or folder recursively. Bypass permits any OS-accessible path.", ["path"], path=S("Path")),
+    _tool("move_path", "Move or rename a file or folder. Bypass permits outside-workspace paths.", ["from", "to"], **{"from": S("Source"), "to": S("Destination")}),
     _tool("run_command", "Run a shell command LOCALLY in the workspace (not on the GPU server). Returns the real exit code and bounded output; "
-          "the full log is kept on disk. Never run interactive programs.", ["command"],
+          "the full log is kept on disk. Stdin is closed; use noninteractive options (e.g. sudo -n). Bypass permits arbitrary commands, including SSH.", ["command"],
           command=S("Shell command"), timeout_s=I("Seconds (default 120, max 600)")),
     _tool("git_status", "Show git status and branch.", []),
     _tool("git_diff", "Show the uncommitted git diff (untracked files listed separately).", []),
@@ -182,14 +182,15 @@ class Workspace:
         self.root = Path(path).resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError("Workspace must be an existing directory")
-        inherited = permissions or policy.ACTIVE_PERMISSIONS.get()
-        if mode is not None:
+        active = policy.ACTIVE_PERMISSIONS.get()
+        inherited = active if active and active.mode == "bypass" else permissions or active
+        if mode is not None and not (inherited and inherited.mode == "bypass"):
             if permissions is not None:
                 raise policy.PermissionContextError("Pass either a permission policy or an explicit mode, not both")
             inherited = policy.EffectivePermissions(self.root, mode)
         if inherited is None:
             raise policy.PermissionContextError("Missing permission context: supply a mode or the parent session policy")
-        if self.root != inherited.root and inherited.root not in self.root.parents:
+        if inherited.mode != "bypass" and self.root != inherited.root and inherited.root not in self.root.parents:
             raise policy.PermissionContextError("Workspace is outside the authorized permission scope")
         self.permissions = inherited
         self.confirm = confirmer or self._confirm
@@ -213,7 +214,7 @@ class Workspace:
         self.remembered.clear()
 
     def delegate(self, path: Path | None = None) -> Workspace:
-        """Delegate tools inside the authorized scope without inventing new permissions."""
+        """Share the session policy; bypass delegates may use any existing directory."""
         self._delegate_n += 1
         child_logs = self.log_dir / "delegates" / str(self._delegate_n) if self.log_dir else None
         return Workspace(path or self.root, confirmer=self.confirm, permissions=self.permissions,
@@ -230,17 +231,24 @@ class Workspace:
     # ------------------------------------------------------------------ gating
     def resolve(self, rel: str, write: bool = False) -> Path:
         real, inside = policy.resolve_in_workspace(self.root, rel)
+        if self.mode == "bypass":
+            return real
         if not inside:
-            raise PermissionError("Path crosses the workspace boundary (absolute paths, '..' and symlinks that leave the project are refused)")
+            raise policy.PolicyDenied("Path crosses the workspace boundary (absolute paths, '..' and symlinks that leave the project are refused)")
         if write and real == self.root:
-            raise PermissionError("Cannot overwrite the workspace root")
+            raise policy.PolicyDenied("Cannot overwrite the workspace root")
         return real
 
     def _gate(self, name: str, args: dict[str, Any], detail: str, extra: str = "") -> None:
+        # Authoritative execution boundary: no downstream permission handler or
+        # classifier can turn bypass into an approval or a policy refusal.
+        if self.mode == "bypass":
+            self.last["permission"] = {"mode": "bypass", "verdict": "allow", "reason": ""}
+            return
         verdict = self.permissions.assess(name, args, self.root)
         self.last["permission"] = {"mode": self.mode, "verdict": verdict.kind, "reason": verdict.reason}
         if verdict.kind == "deny":
-            raise PermissionError(verdict.reason)
+            raise policy.PolicyDenied(verdict.reason)
         if verdict.kind == "allow":
             return
         sig = json.dumps([str(self.root), name, args], sort_keys=True, ensure_ascii=False)
@@ -258,13 +266,24 @@ class Workspace:
         message = f"[{risk.upper()}] {name}: {detail}\n  why asked: {verdict.reason}" + (f"\n{extra}" if extra else "")
         answer = self.confirm(message)
         if not answer:
-            raise PermissionError("Action denied by user")
+            raise policy.PolicyDenied("Action denied by user")
         if answer == "always" and verdict.rememberable:
             self.remembered.add(sig)
 
     # ------------------------------------------------------------------ files
+    def _shown_path(self, path: Path) -> str:
+        return os.path.relpath(path, self.root)
+
     def _candidates(self, base: Path) -> list[Path]:
         files: list[Path] = []
+        if self.mode == "bypass":
+            # Include Git internals, ignored files and synthetic sensitive paths.
+            # No normal-mode discovery filter is an access boundary in bypass.
+            for dirpath, _, names in os.walk(base):
+                files.extend(Path(dirpath) / n for n in names)
+                if len(files) > 20000:
+                    break
+            return files[:20000]
         with contextlib.suppress(Exception):
             res = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=base,
                                  capture_output=True, text=True, timeout=30)
@@ -282,7 +301,7 @@ class Workspace:
 
     def _read_text(self, p: Path) -> str:
         if not p.is_file():
-            raise FileNotFoundError(f"{p.relative_to(self.root)} is not a file")
+            raise FileNotFoundError(f"{self._shown_path(p)} is not a file")
         if p.stat().st_size > 4_000_000:
             raise ValueError("File over 4MB; use search or read a range of a smaller file")
         data = p.read_bytes()
@@ -312,11 +331,11 @@ class Workspace:
             raise FileNotFoundError(f"{a.get('path', '.')} is not a directory")
         entries = []
         for p in sorted(root.iterdir(), key=lambda v: (not v.is_dir(), v.name)):
-            if p.name in IGNORE_DIRS or policy.is_sensitive_name(Path(p.name)):
+            if self.mode != "bypass" and (p.name in IGNORE_DIRS or policy.is_sensitive_name(Path(p.name))):
                 continue
             with contextlib.suppress(PermissionError):
-                self.resolve(str(p.relative_to(self.root)))
-                entries.append(("dir " if p.is_dir() else "file") + " " + str(p.relative_to(self.root)))
+                self.resolve(self._shown_path(p))
+                entries.append(("dir " if p.is_dir() else "file") + " " + self._shown_path(p))
             if len(entries) >= 250:
                 entries.append("... more entries omitted")
                 break
@@ -346,7 +365,7 @@ class Workspace:
                     continue
                 for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if regex.search(line):
-                        results.append(f"{f.relative_to(self.root)}:{i}: {line[:300]}")
+                        results.append(f"{self._shown_path(f)}:{i}: {line[:300]}")
                         if len(results) >= 100:
                             return clipped("\n".join(results) + "\n[first 100 matches]", self.result_cap)
             except (OSError, UnicodeError):
@@ -485,7 +504,8 @@ class Workspace:
         if not command.strip():
             raise ValueError("Empty command")
         timeout = min(600, max(1, a.get("timeout_s", self.command_timeout)))
-        env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k) and not k.startswith("SARNESS_")}
+        env = dict(os.environ) if self.mode == "bypass" else {
+            k: v for k, v in os.environ.items() if not SECRET_ENV.search(k) and not k.startswith("SARNESS_")}
         # A same-size edit inside one second would otherwise be masked by a stale .pyc (mtime has 1 s granularity).
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.update(self.permissions.environment())

@@ -61,7 +61,7 @@ file, shell history, logs, or Git. Several servers can coexist (`sarness server 
 
 ```bash
 sarness                     # interactive session in the current directory
-sarness --dangerously-skip-permissions # run in bypass mode (skip routine approval prompts)
+sarness --dangerously-skip-permissions # run in bypass mode (unrestricted execution; OS permissions still apply)
 sarness --resume            # interactively browse and resume previous sessions
 sarness --resume <id|name>  # resume a specific conversation
 sarness -p "fix the failing test"      # one task, non-interactive (also: sarness run "…")
@@ -130,24 +130,34 @@ influence a verdict by what it writes; approvals only come from your terminal.
 | ordinary commands (tests, builds, git local) | asks | ✔ | ✔ | ✔ |
 | dependency installs, network access | asks | asks | ✔ | ✔ |
 | local destructive (`git reset --hard`, `rm -rf .`, recursive folder delete) | asks | asks | asks | ✔ |
-| secret-looking files (`.env`, `*.pem`, …), `.git` internals | asks | asks | asks | **refused** |
-| outside the workspace · `sudo` · `git push` / `ssh` / publishing · `curl … \| sh` | asks | asks | asks | **refused** |
-| credential stores (`~/.ssh`, `~/.aws`, Sarness config) · `rm -rf /` `~` · `mkfs` · `dd of=/dev/…` · shutdown · fork bombs | **refused** | **refused** | **refused** | **refused** |
+| secret-looking files (`.env`, `*.pem`, …), `.git` internals | asks | asks | asks | ✔ |
+| outside the workspace · `sudo` · `git push` / `ssh` / publishing · `curl … \| sh` | asks | asks | asks | ✔ |
+| credential stores (`~/.ssh`, `~/.aws`, Sarness config) · `rm -rf /` `~` · `mkfs` · `dd of=/dev/…` · shutdown · fork bombs | **refused** | **refused** | **refused** | ✔ |
 
 * `--mode ask|auto|full-access`, `/permissions [mode]`. `/permissions X --save` stores ask/auto/full-access as the default.
-* **Bypass** is `--dangerously-skip-permissions` (this run only) or `/permissions bypass` (typed confirmation, this session only).
-  It cannot be selected with `--mode`, saved as a default, or set in a project file. Pass the flag again when resuming after a restart:
-  `sarness --dangerously-skip-permissions --resume <id|name>`. New prompts, `/new`, `/resume`, and nested CLI tasks keep the
-  active policy. The status bar displays **BYPASS** at the left so it stays visible in narrow terminals.
-* Every executor uses one effective session policy before entering a tool handler. Delegated workspace tools share it;
-  commands pass a scoped `SARNESS_PERMISSION_CONTEXT` to nested CLI tasks. It only applies within the parent workspace.
-  Missing or malformed executor context fails explicitly instead of silently prompting. There is no native subagent scheduler.
-* Approvals show the diff, are for the exact action, and "always" is remembered only for that exact call this session — never for high/critical risk.
-* File tools are confined to the workspace (absolute paths, `..`, and symlinks that escape are refused). Repository-supplied
-  `.sarness/settings.json` may only tighten permissions (`ask`/`auto`) and cannot select a server or carry secrets.
-* **Honest limit:** shell commands cannot be proven contained by static analysis. The command classifier is a conservative heuristic,
-  **not a sandbox**. Use `ask` mode or a disposable VM/container for untrusted code. Commands run with secret-looking environment
-  variables removed, stdin closed, their own process group (killed on timeout/cancel), and tokens redacted from output.
+* **Bypass** is `--dangerously-skip-permissions` or `/permissions bypass` (typed confirmation only when enabling it).
+  It authorizes all tool calls before command classification or filesystem policy. There is no Sarness denylist,
+  privileged-command exception, approval callback, or outside-workspace restriction in bypass.
+  `sudo`, `pkexec`, SSH, network/publishing, destructive commands, Git internals, credential-shaped fixture paths,
+  absolute paths and escaping symlinks are allowed subject to OS permissions.
+* Bypass cannot be a global default or selected by a project file. It is recorded in private session metadata:
+  explicitly resuming a bypass session restores it without repeating the flag. `--mode ask|auto|full-access`
+  explicitly selects normal mode on resume; an explicit bypass flag or inherited bypass takes precedence.
+  New prompts, `/new`, `/resume`, delegates and nested local CLI tasks retain the active policy.
+  The status bar displays **BYPASS** and the launch banner states unrestricted execution.
+* Every executor uses one effective session policy. Delegates share it, including outside the parent workspace in bypass.
+  Shell children inherit `SARNESS_PERMISSION_CONTEXT`, including after changing directories. SSH does not automatically
+  forward environment variables: include `--dangerously-skip-permissions` when launching Sarness on a remote host.
+  There is no native subagent scheduler. Missing/malformed context fails explicitly instead of silently downgrading.
+* Normal-mode approvals show the diff, apply to the exact action, and remember "always" only for that call this session.
+  Normal file tools remain confined to the workspace; project settings can only request `ask`/`auto`.
+* Bypass shell commands inherit the existing environment, including authorized authentication mechanisms.
+  Normal commands still remove secret-looking environment variables. Both retain closed stdin, process-group
+  cancellation/timeouts, bounded output and known-token output redaction. These are execution mechanics, not permission gates.
+  Bypass does not grant Linux privileges: `sudo -n` succeeds only under existing authorization and otherwise reports sudo's
+  actual authentication failure. No sudo configuration or OS authentication is changed.
+* The normal-mode shell classifier is a conservative heuristic, not an OS sandbox.
+  See [the permission execution contract and acceptance procedure](docs/PERMISSIONS.md).
 
 ## Long output and agent-loop hardening
 

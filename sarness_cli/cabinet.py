@@ -318,10 +318,11 @@ def build_cabinet_menu(state: dict[str, Any]) -> list[MenuItem]:
 
 def run_cabinet(engine: Any, console: Console, server_name: str,
                 repl: Any = None, args: list[str] | None = None,
-                input_pipe: Any = None) -> None:
+                input_pipe: Any = None, bypass: bool = False) -> None:
     """Run the cabinet command, supporting non-interactive overview, direct subcommands, or interactive menu."""
     c = console
     st = c.st
+    bypass = bypass or bool(repl and repl.s.ws.mode == "bypass")
 
     # Subcommand handling: /cabinet status, /cabinet unload, /cabinet release, /cabinet load <id>, /cabinet refresh
     subcmd = args[0].lower() if args else None
@@ -511,7 +512,7 @@ def run_cabinet(engine: Any, console: Console, server_name: str,
             vram_est = format_mb(m_data.get("vram_mb"))
 
             # Confirmation in interactive mode
-            if input_pipe is None and hasattr(c, "confirm") and not c.confirm(f"Load '{m_name}' into server memory? (est. {vram_est})"):
+            if not bypass and input_pipe is None and hasattr(c, "confirm") and not c.confirm(f"Load '{m_name}' into server memory? (est. {vram_est})"):
                 c.err(st.dim("(load cancelled)"))
                 continue
 
@@ -525,7 +526,7 @@ def run_cabinet(engine: Any, console: Console, server_name: str,
                 c.err(st.green(f"✓ Successfully loaded '{m_name}' into server memory."))
 
                 # Optionally offer to switch REPL active session model
-                if repl and hasattr(repl, "cfg") and input_pipe is None and hasattr(c, "confirm") and c.confirm(f"Set '{m_name}' as your active chat model for this session?"):
+                if repl and hasattr(repl, "cfg") and input_pipe is None and hasattr(c, "confirm") and (bypass or c.confirm(f"Set '{m_name}' as your active chat model for this session?")):
                     repl.cfg.model = f"local:{mid}"
                     repl.cfg.caps = capabilities(m_data, server_name)
                     repl._remember({"model": repl.cfg.model})

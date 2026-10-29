@@ -634,7 +634,7 @@ class Repl:
             return
 
         prepared = prepare_model(self.engine.conn.engine, model, wanted_ctx=self.settings.get("context_tokens"),
-                                 allow_low_memory=False,
+                                 allow_swap=self.s.ws.mode == "bypass", allow_low_memory=self.s.ws.mode == "bypass",
                                  confirm_swap=lambda msg: c.confirm(msg + "\nSwitch anyway?") is not False)
         old = self.cfg.model
         self.engine.replaces = prepared.replaces
@@ -831,7 +831,7 @@ class Repl:
             if target_model:
                 try:
                     prep = prepare_model(eng, target_model, wanted_ctx=self.settings.get("context_tokens"),
-                                         allow_swap=False, allow_low_memory=False, confirm_swap=None)
+                                         allow_swap=self.s.ws.mode == "bypass", allow_low_memory=self.s.ws.mode == "bypass", confirm_swap=None)
                     self.cfg.model = target_model["ref"]
                     self.cfg.caps = capabilities(target_model, self.server)
                     self.cfg.ctx = prep.ctx
@@ -963,7 +963,7 @@ class Repl:
             ("write_file", "Create or overwrite a file", "Prompts in 'ask'; auto-approved in 'auto' and 'full-access'"),
             ("edit_file", "Perform exact string replacements", "Prompts in 'ask'; auto-approved in 'auto' and 'full-access'"),
             ("append_file", "Append text to a file", "Prompts in 'ask'; auto-approved in 'auto' and 'full-access'"),
-            ("run_command", "Execute bash shell commands", "Prompts in 'ask'; low-risk approved in 'auto'; root/destructive always asks"),
+            ("run_command", "Execute shell commands", "Prompts in 'ask'; low-risk approved in 'auto'; unrestricted in 'bypass'"),
             ("git_diff", "View git repository diff", "Always allowed (read-only)"),
             ("git_status", "Check git working tree status", "Always allowed (read-only)"),
             ("update_plan", "Update the task plan checklist", "Always allowed (agent planning)"),

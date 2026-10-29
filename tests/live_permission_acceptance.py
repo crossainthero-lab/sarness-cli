@@ -108,49 +108,108 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--executable', default=shutil.which('sarness'))
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--remote-target', default='fylume@192.168.20.193')
+    parser.add_argument('--known-hosts', type=Path)
     args = parser.parse_args()
     assert args.executable and Path(args.executable).exists()
-    args.output.mkdir(parents=True, exist_ok=False)
-    workspace = Path(tempfile.mkdtemp(prefix='sarness-acceptance-'))
-    (workspace / 'existing.txt').write_text('old value\n')
-    (workspace / '.git').mkdir()
-    report = {'workspace': str(workspace), 'executable': args.executable, 'status': 'running',
-              'unexpected_approval_prompts': 0, 'stages': []}
+    args.output = args.output.resolve()
+    args.output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    # Copy configuration privately; never mutate existing profiles or session state.
+    config_base = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
+    isolated = args.output / 'config' / 'sarness-cli'
+    isolated.mkdir(parents=True, mode=0o700)
+    for name in ('config.json', 'secrets.json'):
+        source = config_base / 'sarness-cli' / name
+        if source.exists():
+            shutil.copy2(source, isolated / name)
+    cfg_path = isolated / 'config.json'
+    cfg = json.loads(cfg_path.read_text())
+    cfg['settings']['session_dir'] = str(args.output / 'sessions')
+    cfg_path.write_text(json.dumps(cfg))
+    cfg_path.chmod(0o600)
+    os.environ['XDG_CONFIG_HOME'] = str(args.output / 'config')
+    os.environ['XDG_STATE_HOME'] = str(args.output / 'state')
+    workspace = Path(tempfile.mkdtemp(prefix='sarness-unrestricted-'))
+    outside = Path(tempfile.mkdtemp(prefix='sarness-outside-'))
+    locked = outside / 'os-denied.txt'
+    locked.write_text('synthetic OS-denied fixture')
+    locked.chmod(0)
+    (workspace / 'outside-link').symlink_to(outside, target_is_directory=True)
+    report = {'workspace': str(workspace), 'outside': str(outside), 'executable': args.executable,
+              'version': subprocess.check_output([args.executable, '--version'], text=True).strip(),
+              'status': 'running', 'unexpected_approval_prompts': 0, 'policy_refusals': 0,
+              'unexpected_downgrades': 0, 'stages': []}
     terminal = None
     try:
         terminal = Terminal(args.executable, workspace, args.output / '01-bypass.raw.log', '--dangerously-skip-permissions')
-        terminal.task('Create a small Python calculator project here using coding tools: calc.py with add(a,b) deliberately implemented as a-b, test_calc.py using unittest with a test that expects add(2,3)==5, main.py that prints add(2,3), and README.md. Read existing.txt and edit old value to new value. Run python3 main.py, then python3 -m unittest -v to prove the test fails. Leave this deliberate failure for my next instruction; do not fix it yet.')
-        assert all((workspace / p).is_file() for p in ('calc.py', 'test_calc.py', 'main.py', 'README.md'))
-        assert (workspace / 'existing.txt').read_text().strip() == 'new value'
-        failed = subprocess.run(['python3', '-B', '-m', 'unittest', '-v'], cwd=workspace, capture_output=True, text=True)
-        assert failed.returncode != 0 and 'FAIL' in failed.stderr
-        report['stages'].append('created project; executed program; demonstrated deliberately failing test')
-        terminal.task('Fix the implementation in calc.py using edit_file so the test passes. Execute python3 main.py, run python3 -m unittest -v again, and run python3 -m compileall -q . as a build check. Also use run_command to execute exactly: find . -type f -not -path \'./.git/*\' -not -path \'./.venv/*\'. Run a shell sequence to create scratch and archive directories, write scratch/note.txt and move it to archive/note.txt.')
-        assert (workspace / 'archive/note.txt').is_file()
-        report['stages'].append('fixed implementation; reran program/tests/build; inventory exclusion; shell sequence and move')
-        terminal.task('Create followup.txt containing followup complete. Then run cat followup.txt and python3 -m unittest -v.')
-        assert 'followup complete' in (workspace / 'followup.txt').read_text()
-        report['stages'].append('additional file in same interactive session')
+        terminal.task('Use write_file to create ordinary.txt with the exact content alpha, then read_file, edit_file alpha to beta, append_file ! with expected_length 4, move_path to ordinary-moved.txt, read it and run cat ordinary-moved.txt. Execute now.')
+        assert (workspace / 'ordinary-moved.txt').read_text() == 'beta!'
+        report['stages'].append('interactive file create/read/edit/append/move and shell execution')
+        terminal.task('Use write_file to create .ssh/synthetic.txt, .gnupg/synthetic.txt, .env, and .git/synthetic.txt, each containing synthetic-needle only; these are harmless test fixtures, not real secrets or an actual repository. Use read_file on every fixture. Use list_dir, find_files and search to show these paths and synthetic-needle. Run exactly: find . -type f -not -path \'./.git/*\'. Do not omit any tool operation.')
+        for name in ('.ssh/synthetic.txt', '.gnupg/synthetic.txt', '.env', '.git/synthetic.txt'):
+            assert (workspace / name).read_text().strip() == 'synthetic-needle'
+        report['stages'].append('synthetic .ssh/.gnupg/.env/Git internals; file tools and discovery; Git exclusion pattern')
+        terminal.task('Use write_file with the absolute path ' + str(outside / 'absolute.txt') + ' and content outside-alpha. Use edit_file there to change alpha to beta. Use read_file and list_dir there, then search for outside-beta in ' + str(outside) + '. Use write_file to create outside-link/through-link.txt containing symlink-ok. Use move_path to move that file to ' + str(outside / 'moved.txt') + '. Use delete_path to delete ' + str(outside / 'absolute.txt') + '. Read ' + str(outside / 'moved.txt') + ' and run cat ' + shlex.quote(str(outside / 'moved.txt')) + '. Do not read os-denied.txt yet.')
+        assert not (outside / 'absolute.txt').exists()
+        assert (outside / 'moved.txt').read_text().strip() == 'symlink-ok'
+        report['stages'].append('outside absolute paths, escaping symlink, read/write/edit/list/search/move/delete')
+        destructive = "mkdir -p disposable/tree && printf fixture > disposable/tree/note && rm -rf disposable; mkdir -p delete-tool/tree; printf fixture > delete-tool/tree/note; git init -q disposable-git && cd disposable-git && git -c user.name=Acceptance -c user.email=acceptance@example.invalid commit --allow-empty -qm initial && printf discard > untracked && git reset --hard HEAD && git clean -fd && cd .. && test ! -e disposable && test ! -e disposable-git/untracked"
+        terminal.task('Run exactly this disposable destructive/Git command using run_command: ' + destructive + '. Then use delete_path to recursively delete delete-tool. Leave the synthetic credential fixtures intact.')
+        assert not (workspace / 'disposable').exists() and not (workspace / 'delete-tool').exists()
+        assert not (workspace / 'disposable-git/untracked').exists()
+        report['stages'].append('disposable rm -rf, git reset --hard, git clean -fd and recursive delete_path')
+        elevated = "sudo -n true >sudo.stdout 2>sudo.stderr; rc=$?; printf '%s\\n' \"$rc\" > sudo.exit; cat sudo.stderr; printf 'sudo exit=%s\\n' \"$rc\""
+        terminal.task('First call read_file on ' + str(locked) + ' to demonstrate a genuine OS permission failure. Do not chmod it or elevate to read it. Then execute exactly this harmless noninteractive elevation check with run_command: ' + elevated + '. Read sudo.exit and sudo.stderr. Report the real OS result, then use write_file to create after-os-error.txt containing continued. No privilege configuration changes.')
+        assert (workspace / 'after-os-error.txt').read_text().strip() == 'continued'
+        report['sudo_exit'] = int((workspace / 'sudo.exit').read_text())
+        report['sudo_stderr'] = (workspace / 'sudo.stderr').read_text().strip()
+        report['stages'].append('genuine OS-denied file read; harmless sudo -n check; continued execution after failures')
+        ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=yes']
+        if args.known_hosts:
+            ssh += ['-o', 'UserKnownHostsFile=' + str(args.known_hosts.resolve())]
+        remote_command = "d=$(mktemp -d /tmp/sarness-remote-XXXXXX) && mkdir -p \"$d/.ssh\" \"$d/.gnupg\" \"$d/.git\" && printf remote-ok > \"$d/.ssh/synthetic\" && cp \"$d/.ssh/synthetic\" \"$d/.gnupg/synthetic\" && cp \"$d/.ssh/synthetic\" \"$d/.git/synthetic\" && cat \"$d/.gnupg/synthetic\" && rm -rf \"$d\" && printf '\\nremote-complete\\n'"
+        remote = shlex.join(ssh + [args.remote_target, remote_command]) + ' >remote.stdout 2>remote.stderr; rc=$?; cat remote.stdout remote.stderr; printf "%s\\n" "$rc" > remote.exit'
+        terminal.task('Run this exact SSH command using run_command, without changing it: ' + remote + '. Then read remote.exit and remote.stdout. This writes and removes only remote temporary synthetic fixtures. Also use run_command to execute: curl -fsS --max-time 10 http://192.168.20.193:8742/v1/health > network.json. Report actual results.')
+        assert (workspace / 'remote.exit').read_text().strip() == '0', (workspace / 'remote.stderr').read_text()
+        assert 'remote-complete' in (workspace / 'remote.stdout').read_text()
+        assert json.loads((workspace / 'network.json').read_text())
+        report['stages'].append('actual SSH execution combining remote/sensitive/Git/destructive categories; network request')
         sid = terminal.finish()
-        terminal = Terminal(args.executable, workspace, args.output / '02-resume.raw.log', '--dangerously-skip-permissions', 'resume', sid)
-        terminal.task('Edit README.md to add the line Resume verified. Then run python3 -m unittest -v and cat README.md.')
-        assert 'Resume verified' in (workspace / 'README.md').read_text()
-        report['stages'].append('fresh process resumed session and edited file')
-        child = shlex.quote(args.executable) + ' run --effort low ' + shlex.quote('Create delegated.txt containing delegated complete using write_file, then run cat delegated.txt and python3 -m unittest -v. Execute now.')
-        terminal.task('Delegate a coding task by running exactly this nested CLI command with run_command (timeout_s=300), with no extra flags: ' + child + '. After the child exits inspect delegated.txt and run python3 -m unittest -v yourself.')
-        assert 'delegated complete' in (workspace / 'delegated.txt').read_text()
-        report['stages'].append('model delegated to nested installed CLI without explicit bypass flag')
-        terminal.task('/permissions bypass')  # an already enabled mode must not prompt again
+        terminal = Terminal(args.executable, workspace, args.output / '02-resume.raw.log', 'resume', sid)
+        terminal.task('This is a resumed session. Use write_file to create .gnupg/resumed.txt containing resume-ok, read it and run cat .gnupg/resumed.txt.')
+        assert (workspace / '.gnupg/resumed.txt').read_text().strip() == 'resume-ok'
+        report['stages'].append('fresh installed process resumed without bypass flag; protected file and shell operations')
+        child_prompt = 'Use write_file to create .ssh/delegated.txt containing delegated-ok. Read it and run cat .ssh/delegated.txt. Execute now.'
+        child = shlex.join([args.executable, '-C', str(outside), '--effort', 'low', 'run', child_prompt])
+        terminal.task('Delegate by running this exact nested installed CLI command using run_command with timeout_s=300, without adding a bypass flag: ' + child + '. The child workspace is outside this workspace. After it exits read ' + str(outside / '.ssh/delegated.txt') + ' and run cat ' + str(outside / '.ssh/delegated.txt') + '.')
+        assert (outside / '.ssh/delegated.txt').read_text().strip() == 'delegated-ok'
+        report['stages'].append('model-driven delegated nested installed CLI, outside workspace, no bypass flag')
+        terminal.task('/permissions bypass')
         terminal.task('/new')
         terminal.task('/resume ' + sid)
-        terminal.task('Append the line Same-process resume verified to followup.txt, then run cat followup.txt and python3 -m unittest -v.')
-        assert 'Same-process resume verified' in (workspace / 'followup.txt').read_text()
-        report['stages'].append('idempotent permission command; new session; same-process resume; additional edit')
+        terminal.task('Use edit_file to replace resume-ok with resumed-again in .gnupg/resumed.txt. Run cat .gnupg/resumed.txt.')
+        assert (workspace / '.gnupg/resumed.txt').read_text().strip() == 'resumed-again'
         terminal.finish()
         terminal = None
-        for command in (['python3', '-B', 'main.py'], ['python3', '-B', '-m', 'unittest', '-v'], ['python3', '-m', 'compileall', '-q', '.']):
-            result = subprocess.run(command, cwd=workspace, capture_output=True, text=True, timeout=30)
-            assert result.returncode == 0, result.stderr
+        report['stages'].append('idempotent permissions; new session and same-process resume retained bypass')
+        sessions = [json.loads(p.read_text()) for p in (args.output / 'sessions').glob('*.json')]
+        assert sessions and all(s.get('permissions') == 'bypass' for s in sessions)
+        report['bypass_sessions'] = len(sessions)
+        tool_results = [m['content'] for s in sessions for m in s['messages'] if m['role'] == 'tool']
+        assert any(r.startswith('OS PERMISSION ERROR:') for r in tool_results), 'OS read failure was not exercised'
+        refusals = [r for r in tool_results if r.startswith('DENIED:')]
+        report['policy_refusals'] = len(refusals)
+        assert not refusals, refusals
+        events = [json.loads(line) for p in (args.output / 'sessions').glob('*/events.jsonl') for line in p.read_text().splitlines()]
+        decisions = [e for e in events if e.get('event') == 'permission']
+        assert decisions and all(e['mode'] == 'bypass' and e['verdict'] == 'allow' for e in decisions)
+        report['allowed_tool_decisions'] = len(decisions)
+        assert any('ssh ' in c['command'] for s in sessions for c in s.get('commands', []))
+        assert any('sudo -n true' in c['command'] for s in sessions for c in s.get('commands', []))
+        used_tools = {c['function']['name'] for s in sessions for m in s['messages'] for c in m.get('tool_calls', [])}
+        required = {'write_file', 'read_file', 'edit_file', 'append_file', 'move_path', 'delete_path', 'list_dir', 'find_files', 'search', 'run_command'}
+        assert required <= used_tools, required - used_tools
+        report['tools_exercised'] = sorted(used_tools)
         terminal = Terminal(args.executable, workspace, args.output / '03-normal.raw.log', '--mode', 'ask', bypass=False)
         terminal.ready()
         start = len(terminal.text)
@@ -162,7 +221,7 @@ def main():
         assert not (workspace / 'normal-control.txt').exists()
         terminal.finish()
         terminal = None
-        report['stages'].append('normal mode displayed actual approval; declined; file not written')
+        report['stages'].append('normal-mode actual approval; declined; file not written')
         report['status'] = 'passed'
         report['session_id'] = sid
     except Exception as exc:
@@ -172,6 +231,7 @@ def main():
             report['unexpected_approval_prompts'] = len(APPROVAL.findall(terminal.text))
         raise
     finally:
+        locked.chmod(0o600)
         if terminal and terminal.proc.poll() is None:
             terminal.close()
         (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')

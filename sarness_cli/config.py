@@ -121,7 +121,7 @@ def validate_setting(key: str, value: Any) -> Any:
     if key not in DEFAULTS:
         raise ConfigError(f"Unknown setting '{key}'. Known: {', '.join(sorted(DEFAULTS))}")
     if key == "permissions" and value == "bypass":
-        raise ConfigError("'bypass' can never be saved as a default; pass --dangerously-skip-permissions per run")
+        raise ConfigError("'bypass' cannot be a global default; use --dangerously-skip-permissions or resume a bypass session")
     if not _CHECKS[key](value):
         raise ConfigError(f"Invalid value for {key}: {value!r}")
     return value

@@ -9,9 +9,9 @@ so the command classifier is a conservative heuristic, not an OS sandbox (docume
   edit in workspace  ask    ok        ok          ok
   ordinary command   ask    ok        ok          ok
   install / network  ask   ask        ok          ok
-  local destructive  ask   ask       ask          ok   (git reset --hard, rm -r <dir>, .git writes excepted)
-  outside workspace, sensitive, privileged, remote/publish -> ask normally, deny in bypass
-  credential stores and catastrophic commands -> denied in every mode
+  local destructive  ask   ask       ask          ok
+  Bypass authorizes every tool and command before classification or path checks.
+  All other modes retain their existing boundaries. OS permissions still apply.
 """
 from __future__ import annotations
 
@@ -308,7 +308,7 @@ def _classify_into(cmd: str, root: Path, f: CmdFlags, depth: int) -> None:
             seg_safe = True
         all_safe = all_safe and seg_safe
 
-        # catastrophic: refused in every mode
+        # Normal-mode catastrophic-command classification (bypass never enters here)
         if prog in {"mkfs", "shutdown", "reboot", "poweroff", "halt", "wipefs", "fdisk", "parted"} or prog.startswith("mkfs."):
             f.deny = f"`{prog}` is never run by the agent"
         if prog == "dd" and any(a.startswith("of=/dev/") for a in args):
@@ -386,7 +386,7 @@ def _classify_into(cmd: str, root: Path, f: CmdFlags, depth: int) -> None:
         prev_downloader = downloader
 
         for a in _path_arguments(prog, args):
-            # Credential filenames and system write targets remain boundaries in bypass.
+            # Normal-mode credential and system-write boundaries.
             if is_sensitive_name(Path(a)) or touches_git_dir(Path(a)):
                 f.sensitive = f.sensitive or a
             target = (root / os.path.expanduser(a)).resolve(strict=False)
@@ -432,9 +432,13 @@ class PermissionContextError(ValueError):
     """Permission context must be explicit; never fall back to an interactive mode."""
 
 
+class PolicyDenied(PermissionError):
+    """A Sarness decision, distinct from an operating-system PermissionError."""
+
+
 @dataclass
 class EffectivePermissions:
-    """One live policy per session, shared by delegates; never serialized in session files."""
+    """One live policy per session, shared by delegates and inherited by subprocesses."""
 
     root: Path
     mode: str
@@ -451,14 +455,11 @@ class EffectivePermissions:
         self.remembered.clear()
 
     def assess(self, tool: str, args: dict[str, Any], workspace: Path) -> Verdict:
+        if self.mode == "bypass":
+            return Verdict.allow()
         if workspace != self.root and self.root not in workspace.parents:
             return Verdict.deny("Delegated workspace is outside the authorized workspace")
-        verdict = assess(tool, args, workspace, self.mode)
-        # An executor never receives an interactive verdict in bypass, even if
-        # a future classifier adds a new approval branch.
-        if self.mode == "bypass" and verdict.kind == "ask":
-            return Verdict.deny(f"Refused in BYPASS: {verdict.reason}")
-        return verdict
+        return assess(tool, args, workspace, self.mode)
 
     def environment(self) -> dict[str, str]:
         return {"SARNESS_PERMISSION_CONTEXT": json.dumps({"root": str(self.root), "mode": self.mode})}
@@ -477,7 +478,7 @@ class EffectivePermissions:
                 if not parent.is_absolute():
                     raise ValueError("root must be absolute")
                 policy = cls(parent, mode)
-                if root != policy.root and policy.root not in root.parents:
+                if mode != "bypass" and root != policy.root and policy.root not in root.parents:
                     raise ValueError("workspace is outside the inherited permission scope")
                 return policy
             except (ValueError, TypeError, KeyError, OSError) as exc:
@@ -489,13 +490,15 @@ ACTIVE_PERMISSIONS: ContextVar[EffectivePermissions | None] = ContextVar("sarnes
 
 
 def boundary(mode: str, risk: int, reason: str) -> Verdict:
-    """Protected actions require interactive consent normally and are refused in bypass."""
+    """Normal modes require consent; bypass has no policy boundaries."""
     if mode == "bypass":
-        return Verdict.deny(f"Refused in BYPASS: {reason}")
+        return Verdict.allow()
     return Verdict.ask(risk, reason, rememberable=False)
 
 
 def verdict_for_command(cmd: str, root: Path, mode: str) -> Verdict:
+    if mode == "bypass":
+        return Verdict.allow()
     if mode not in MODES:
         return Verdict.deny(f"Unknown permission mode {mode!r}")
     f = classify_command(cmd, root)
@@ -534,7 +537,9 @@ def resolve_in_workspace(root: Path, rel: str) -> tuple[Path, bool]:
 
 
 def verdict_for_path(root: Path, rel: str, access: str, mode: str, recursive_dir: bool = False) -> Verdict:
-    """access: read | write | delete. Files outside the workspace are not reachable by file tools."""
+    """access: read | write | delete. Bypass permits every OS-accessible path."""
+    if mode == "bypass":
+        return Verdict.allow()
     real, inside = resolve_in_workspace(root, rel)
     if not inside:
         return Verdict.deny(f"`{rel}` is outside the workspace; file tools cannot reach it (absolute paths, '..' and escaping symlinks are refused)")
@@ -558,6 +563,8 @@ def verdict_for_path(root: Path, rel: str, access: str, mode: str, recursive_dir
 
 
 def assess(tool: str, a: dict[str, Any], root: Path, mode: str) -> Verdict:
+    if mode == "bypass":
+        return Verdict.allow()
     s = lambda k: str(a.get(k) or "")  # noqa: E731
     if mode not in MODES:
         return Verdict.deny(f"Unknown permission mode {mode!r}")

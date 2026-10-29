@@ -132,11 +132,11 @@ def test_multiple_prompts_delegated_cli_and_resume(tmp_path):
         server.stop()
 
 
-def test_installed_boundary_denials_and_normal_approvals(tmp_path):
+def test_installed_unrestricted_execution_and_normal_approvals(tmp_path):
     server = FakeEngineServer([
         [done(calls=[("run_command", {"command": "git push origin main"}),
-                     ("run_command", {"command": "cat ~/.ssh/id_ed25519"}),
-                     ("run_command", {"command": "rm -rf /"})])],
+                     ("run_command", {"command": "mkdir -p .ssh; printf synthetic > .ssh/fixture; cat .ssh/fixture"}),
+                     ("run_command", {"command": "rm -rf .ssh"})])],
         [done(content="BOUNDARIES_COMPLETE")],
         [done(calls=[("write_file", {"path": "should-not-exist", "content": "no"})])],
         [done(content="ASK_COMPLETE")],
@@ -147,8 +147,8 @@ def test_installed_boundary_denials_and_normal_approvals(tmp_path):
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode == 0, result.stderr
         results = [m["content"] for m in server.completions[1]["messages"] if m["role"] == "tool"]
-        assert len(results) == 3 and all(r.startswith("DENIED") for r in results)
-        assert "approval needed" not in result.stderr  # bypass boundaries are explicit denials
+        assert len(results) == 3 and all(r.startswith("exit code:") for r in results)
+        assert "approval needed" not in result.stderr  # bypass commands actually executed
         result = subprocess.run(command() + ["run", "check", "-C", str(tmp_path), "--mode", "ask"],
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode == 0 and "approval needed" in result.stderr
@@ -199,7 +199,7 @@ def test_repl_inventory_boundaries_failures_new_and_resume(tmp_path):
         assert 'Allow?' not in terminal.output and 'Approve?' not in terminal.output
         assert 'Type \'bypass\'' not in terminal.output
         assert 'approval needed' not in terminal.output
-        assert 'Refused in BYPASS' in terminal.output
+        assert 'Refused in BYPASS' not in terminal.output and 'DENIED:' not in terminal.output
         assert (root / 'after.txt').read_text() == 'resumed'
         assert 'BYPASS' in terminal.output
     finally:

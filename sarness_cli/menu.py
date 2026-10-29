@@ -307,7 +307,7 @@ def select_permissions(current_mode: str, input_pipe: Any = None) -> str | None:
                  current=(current_mode == "auto")),
         MenuItem("full-access", "Full Access", "Most local dev actions without prompts; destructive still asks",
                  current=(current_mode == "full-access")),
-        MenuItem("bypass", "Bypass", "Skip routine approvals for THIS session only (hard limits remain)",
+        MenuItem("bypass", "Bypass", "Unrestricted execution; only OS permissions and authentication apply",
                  current=(current_mode == "bypass")),
     ]
     sub = f"Current mode: {current_mode}"

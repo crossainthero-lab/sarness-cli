@@ -93,19 +93,19 @@ def test_effort_and_thinking_reach_the_engine_as_documented(engine, project):
     assert p[2]["thinking"] is False
 
 
-def test_bypass_skips_routine_prompts_but_keeps_boundaries(engine, project, capsys):
+def test_bypass_executes_formerly_refused_commands(engine, project, capsys):
     srv = engine([
         [done(calls=[("run_command", {"command": "git reset --hard; rm -rf build"}), ("run_command", {"command": "git push origin main"}),
-                     ("run_command", {"command": "cat ~/.ssh/id_ed25519"})])],
+                     ("run_command", {"command": "mkdir -p .ssh; printf synthetic > .ssh/fixture; cat .ssh/fixture"})])],
         [done(content="done")]])
     assert run_cli("run", "-C", str(project), "go", "--dangerously-skip-permissions") == 0
     err = capsys.readouterr().err
     assert "BYPASS PERMISSIONS" in err
     results = [m["content"] for m in srv.completions[1]["messages"] if m["role"] == "tool"]
     assert results[0].startswith("exit code:")                                 # routine + local-destructive ran with no prompt
-    assert results[1].startswith("DENIED") and "Refused in BYPASS" in results[1]
+    assert results[1].startswith("exit code:")
     assert "approval needed" not in err
-    assert results[2].startswith("DENIED") and "credential" in results[2]       # credential access refused outright
+    assert results[2].startswith("exit code: 0") and "synthetic" in results[2]
 
 
 def test_modes_are_enforced_by_the_tool_layer(engine, project):
@@ -221,3 +221,25 @@ def test_consented_swap_proceeds_and_later_foreign_swap_is_still_caught(engine, 
     # same setup but WITHOUT consent still refuses before any request
     srv2 = engine([[done(content="no")]], llm_status=idle_other)
     assert run_cli("run", "-C", str(project), "hi") == 1 and srv2.completions == []
+
+
+def test_resume_restores_bypass_unless_user_explicitly_selects_normal(engine, project, capsys):
+    from helpers import make_cfg
+    from sarness_cli.agent import Session
+    from sarness_cli.tools import Workspace
+    saved = Session(Workspace(project, "bypass"), make_cfg(model="local:coder@Q4"))
+    saved.save()
+    srv = engine([
+        [done(calls=[("write_file", {"path": ".gnupg/synthetic", "content": "restored"}),
+                     ("run_command", {"command": "cat .gnupg/synthetic"})])],
+        [done(content="done")],
+        [done(calls=[("write_file", {"path": "normal.txt", "content": "must ask"})])],
+        [done(content="done")],
+    ])
+    assert run_cli("resume", saved.id, "continue") == 0
+    assert "BYPASS PERMISSIONS" in capsys.readouterr().err
+    assert (project / ".gnupg/synthetic").read_text() == "restored"
+    assert run_cli("resume", saved.id, "continue", "--mode", "ask") == 0
+    assert not (project / "normal.txt").exists()
+    assert "approval needed" in capsys.readouterr().err
+    assert "Permissions: Bypass" in srv.completions[0]["messages"][0]["content"]

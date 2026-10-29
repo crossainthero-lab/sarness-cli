@@ -79,6 +79,8 @@ def test_bad_inherited_context_never_falls_back(tmp_path, monkeypatch, raw):
 def test_launch_flag_and_inheritance_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("SARNESS_PERMISSION_CONTEXT", json.dumps({"root": str(tmp_path), "mode": "bypass"}))
     assert policy.EffectivePermissions.for_launch(tmp_path, "ask").mode == "bypass"
+    assert policy.EffectivePermissions.for_launch(tmp_path.parent, "auto").mode == "bypass"
+    monkeypatch.setenv("SARNESS_PERMISSION_CONTEXT", json.dumps({"root": str(tmp_path), "mode": "auto"}))
     with pytest.raises(policy.PermissionContextError, match="scope"):
         policy.EffectivePermissions.for_launch(tmp_path.parent, "auto")
     monkeypatch.setenv("SARNESS_PERMISSION_CONTEXT", "invalid")
@@ -99,32 +101,26 @@ def test_resume_uses_current_launch_policy_not_saved_messages(tmp_path):
     loaded = Session.load(old.id, ws, cfg)
     loaded.ws.execute("write_file", {"path": "resumed.txt", "content": "OK"})
     loaded.save()
-    assert "permissions" not in json.loads(loaded.path.read_text())
+    assert json.loads(loaded.path.read_text())["permissions"] == "bypass"
     again = Session.load(old.id, Workspace(tmp_path, "ask", lambda _: False), cfg)
     with pytest.raises(PermissionError):
         again.ws.execute("run_command", {"command": "echo ordinary"})
 
 
-@pytest.mark.parametrize("command,kind", [("cat ~/.ssh/id_ed25519", "deny"), ("rm -rf /", "deny"), ("mkfs.ext4 /dev/test", "deny"), ("sudo true", "deny"), ("git push origin main", "deny"), ("npm publish", "deny"), ("rm -f /usr/bin/example", "deny"), ("cat .env", "deny"), ("echo changed > /usr/share/example", "deny"), ("echo OK > /dev/null", "allow")])
+@pytest.mark.parametrize("command,kind", [("cat ~/.ssh/id_ed25519", "allow"), ("rm -rf /", "allow"), ("mkfs.ext4 /dev/test", "allow"), ("sudo true", "allow"), ("git push origin main", "allow"), ("npm publish", "allow"), ("rm -f /usr/bin/example", "allow"), ("cat .env", "allow"), ("echo changed > /usr/share/example", "allow"), ("echo OK > /dev/null", "allow")])
 def test_critical_shell_boundaries(command, kind, tmp_path):
     assert policy.verdict_for_command(command, tmp_path, "bypass").kind == kind
 
 
-def test_sensitive_file_denied_before_read_or_preview(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text("PRIVATE")
-    asked = []
-    ws = Workspace(tmp_path, "bypass", lambda m: asked.append(m) or False)
-    def forbidden_read(*args, **kwargs):
-        pytest.fail("File read before authorization")
-    monkeypatch.setattr(Path, "read_text", forbidden_read)
-    for name, args in [("edit_file", {"path": ".env", "old_string": "PRIVATE", "new_string": "changed"}), ("write_file", {"path": ".env", "content": "changed"})]:
-        with pytest.raises(PermissionError):
-            ws.execute(name, args)
-    assert asked == []
+def test_sensitive_file_allowed_without_preview(tmp_path):
+    (tmp_path / ".env").write_text("SYNTHETIC")
+    ws = Workspace(tmp_path, "bypass", no_prompt)
+    ws.execute("edit_file", {"path": ".env", "old_string": "SYNTHETIC", "new_string": "changed"})
+    assert "changed" in ws.execute("read_file", {"path": ".env"})
 
 
 def test_registry_has_no_allow_fallback(tmp_path):
-    assert policy.assess("future_unclassified_tool", {}, tmp_path, "bypass").kind == "deny"
+    assert policy.assess("future_unclassified_tool", {}, tmp_path, "auto").kind == "deny"
     assert policy.verdict_for_command("pwd", tmp_path, None).kind == "deny"
     for tool in TOOLS:
         name = tool["function"]["name"]
@@ -141,13 +137,13 @@ def test_normal_approval_with_diff_is_preserved(tmp_path):
     assert (tmp_path / "a.txt").read_text() == "before\n"
 
 
-def test_bulk_search_does_not_follow_escaping_or_secret_symlinks(tmp_path):
+def test_normal_bulk_search_does_not_follow_escaping_or_secret_symlinks(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     outside = tmp_path / "private.txt"
     outside.write_text("private needle")
     (root / "ordinary.txt").symlink_to(outside)
-    ws = Workspace(root, "bypass", no_prompt)
+    ws = Workspace(root, "auto", no_prompt)
     assert "private needle" not in ws.execute("search", {"pattern": "needle"})
 
 
@@ -184,15 +180,18 @@ def test_search_patterns_are_data_not_file_access(tmp_path, command):
     "rg -- --glob .git/config", "grep --exclude-dir=.git needle .env",
 ])
 def test_pattern_options_never_hide_real_sensitive_operands(tmp_path, command):
-    assert policy.verdict_for_command(command, tmp_path, 'bypass').kind == 'deny'
+    assert policy.verdict_for_command(command, tmp_path, 'auto').kind == 'ask'
 
 
-def test_bypass_invariant_rejects_future_interactive_verdict(tmp_path, monkeypatch):
-    ws = Workspace(tmp_path, 'bypass', no_prompt)
-    monkeypatch.setattr(policy, 'assess', lambda *a: policy.Verdict.ask(policy.HIGH, 'future boundary'))
-    with pytest.raises(PermissionError, match='Refused in BYPASS: future boundary'):
-        ws.execute('write_file', {'path': 'never', 'content': 'no'})
-    assert not (tmp_path / 'never').exists()
+@pytest.mark.parametrize("kind", ["ask", "deny"])
+def test_bypass_precedes_all_downstream_policy_handlers(tmp_path, monkeypatch, kind):
+    ws = Workspace(tmp_path, "bypass", no_prompt)
+    monkeypatch.setattr(policy, "assess", lambda *a: policy.Verdict(kind, policy.HIGH, "future boundary"))
+    monkeypatch.setattr(ws.permissions, "assess", lambda *a: policy.Verdict(kind, policy.HIGH, "hidden boundary"))
+    monkeypatch.setattr(policy, "classify_command", lambda *a: pytest.fail("Classifier ran in bypass"))
+    ws.execute("write_file", {"path": ".ssh/allowed", "content": "yes"})
+    assert "exit code: 0" in ws.execute("run_command", {"command": "cat .ssh/allowed"})
+    assert policy.verdict_for_command("mkfs.ext4 /dev/never-executed", tmp_path, "bypass").kind == "allow"
 
 
 def test_failure_does_not_drop_active_policy(tmp_path, monkeypatch):

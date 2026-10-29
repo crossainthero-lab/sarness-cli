@@ -39,7 +39,7 @@ def test_environment_layer(tmp_path, monkeypatch):
 
 def test_bypass_can_never_be_saved_or_configured():
     for fn in (lambda: C.update_settings({"permissions": "bypass"}), lambda: C.coerce_setting("permissions", "bypass"), lambda: C.validate_setting("permissions", "bypass")):
-        with pytest.raises(C.ConfigError, match="never be saved"):
+        with pytest.raises(C.ConfigError, match="global default"):
             fn()
     assert "bypass" not in json.dumps(C.load_config())
 

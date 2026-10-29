@@ -36,7 +36,7 @@ def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
     p.add_argument("--thinking", choices=THINKING, default=d, help="Model thinking mode (models that support it)")
     p.add_argument("--mode", default=d, metavar="{ask,auto,full-access}", help="Permission mode for this run")
     p.add_argument("--dangerously-skip-permissions", action="store_true", default=d if suppress else False,
-                   help="Bypass Permissions for THIS run: skip routine approvals (hard limits remain)")
+                   help="Unrestricted execution: skip all Sarness permission approvals and denials (OS permissions still apply)")
     p.add_argument("-C", "--workspace", default=d, help="Project folder on THIS computer (default: current directory)")
     p.add_argument("--max-tokens", type=int, default=d, help="Maximum output tokens per model turn")
     p.add_argument("--max-steps", type=int, default=d, help="Maximum model turns per task")
@@ -149,9 +149,11 @@ def pick_model(models: list[dict[str, Any]], settings: dict[str, Any], server: s
 def start_session(a: argparse.Namespace, prompt: str | None, resume_id: str | None = None) -> int:
     workspace = resolve_workspace(a)
     settings, origin = effective_settings(workspace, overrides(a))
+    saved_bypass = False
     if resume_id:
         sessions = Session.list_sessions(500)
         saved = next((s for s in sessions if s["id"] == resume_id), None)
+        saved_bypass = bool(saved and saved.get("permissions") == "bypass" and not getattr(a, "mode", None))
         if saved and saved.get("workspace"):
             workspace = Path(saved["workspace"]).resolve()
             a.workspace = str(workspace)
@@ -167,7 +169,7 @@ def start_session(a: argparse.Namespace, prompt: str | None, resume_id: str | No
     for n in notes:
         console.notice(n, "warn")
     permissions = EffectivePermissions.for_launch(
-        workspace, settings["permissions"], bypass=getattr(a, "dangerously_skip_permissions", False))
+        workspace, settings["permissions"], bypass=getattr(a, "dangerously_skip_permissions", False) or saved_bypass)
     mode = permissions.mode
 
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -237,8 +239,8 @@ def start_session(a: argparse.Namespace, prompt: str | None, resume_id: str | No
             if model.get("supported") is False:
                 raise ConfigError(f"{model['name']} is not supported by this engine: {model.get('unsupported_reason')}")
             prepared = prepare_model(engine_obj, model, wanted_ctx=settings.get("context_tokens"),
-                                     allow_swap=getattr(a, "allow_model_swap", False),
-                                     allow_low_memory=getattr(a, "allow_low_memory", False),
+                                     allow_swap=mode == "bypass" or getattr(a, "allow_model_swap", False),
+                                     allow_low_memory=mode == "bypass" or getattr(a, "allow_low_memory", False),
                                      confirm_swap=lambda msg: console.confirm(msg + "\nLoad it anyway?") is not False)
         except (EngineError, ModelError, ConfigError) as exc:
             if is_scripted:
@@ -278,7 +280,7 @@ def start_session(a: argparse.Namespace, prompt: str | None, resume_id: str | No
             session = Session.load(resume_id, ws, cfg, console)
         else:
             session = Session(ws, cfg, ui=console)
-        session.swap_confirm = lambda msg: console.confirm(msg + "\nContinue anyway?") is not False
+        session.swap_confirm = lambda msg: session.ws.mode == "bypass" or console.confirm(msg + "\nContinue anyway?") is not False
         live = LiveEngine(conn, replaces=prepared.replaces) if conn and connected else None
 
         if is_scripted:
@@ -456,7 +458,7 @@ def cmd_config(a: argparse.Namespace) -> int:
     if not cfg["profiles"]:
         say("  (none - run 'sarness setup')")
     say(f"\nFiles: {config_path()}  {secrets_path()}  (both 0600; tokens are never shown)")
-    say("Change: sarness config set KEY VALUE [--project]   Bypass permissions can never be saved.")
+    say("Change: sarness config set KEY VALUE [--project]   Bypass cannot be a global default; it is retained for explicitly resumed sessions.")
     return 0
 
 
@@ -507,6 +509,8 @@ def cmd_upgrade(a: argparse.Namespace) -> int:
 def cmd_cabinet(a: argparse.Namespace) -> int:
     workspace = resolve_workspace(a)
     settings, _ = effective_settings(workspace, overrides(a))
+    permissions = EffectivePermissions.for_launch(
+        workspace, settings["permissions"], bypass=getattr(a, "dangerously_skip_permissions", False))
     console = Console(show_reasoning=settings["show_reasoning"], verbose=getattr(a, "verbose", False) or settings["log_level"] == "verbose")
     cfg = load_config()
     server_name = getattr(a, "server", None) or settings.get("server") or cfg["settings"].get("server")
@@ -522,7 +526,7 @@ def cmd_cabinet(a: argparse.Namespace) -> int:
         eng = conn.connect()
         from .cabinet import run_cabinet
         args = getattr(a, "subcommand", None) or []
-        run_cabinet(eng, console, server_name, args=args)
+        run_cabinet(eng, console, server_name, args=args, bypass=permissions.mode == "bypass")
         return 0
     except Exception as exc:
         console.err(console.st.red(f"Error: {exc}"))

@@ -226,10 +226,10 @@ class Console:
 
 
 def warning_bypass(st: Style) -> str:
-    return st.amber(st.bold("⚠ Bypass Permissions skips routine approvals (edits, ordinary commands, local destructive actions).")) + st.dim(
-        "\n  Protected credentials, catastrophic commands, privileged / remote / publishing / out-of-workspace actions are refused without prompting.")
+    return st.amber(st.bold("⚠ Bypass Permissions allows unrestricted tool and command execution.")) + st.dim(
+        "\n  No Sarness approval prompts or policy denials. Operating-system permissions and authentication still apply.")
 
 
 def banner_bypass(st: Style) -> str:
-    return st.amber(st.bold("⚠ BYPASS PERMISSIONS is ON for this session: routine approvals are skipped.")) + st.dim(
-        "\n  Protected credentials, catastrophic commands, privileged / remote / publishing / out-of-workspace actions are refused without prompting.")
+    return st.amber(st.bold("⚠ BYPASS PERMISSIONS is ON for this session: unrestricted execution.")) + st.dim(
+        "\n  No Sarness approval prompts or policy denials. Operating-system permissions and authentication still apply.")
