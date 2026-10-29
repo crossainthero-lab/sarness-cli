@@ -91,7 +91,11 @@ class Proxy:
             do_GET = do_POST = _forward
 
         self.pending_length = False
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+
+        class Quiet(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):   # clients that hang up on purpose are expected
+                pass
+        self.srv = Quiet(("127.0.0.1", 0), H)
         self.srv.daemon_threads = True
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
@@ -193,7 +197,7 @@ def scenario_injected(exe, workdir, upstream_cfg):
     d1 = json.loads(sessions(env)[-1].read_text())
     ok = check("Ctrl-C checkpointed the session", rc == 130 and d1["status"] == "interrupted", f"rc={rc} status={d1['status']}")
     msgs_before = len(d1["messages"])
-    cmd = [exe, "-C", str(ws), "resume", sid, "--dangerously-skip-permissions", "--max-steps", "120", "Continue the task from the checkpoint; do not redo completed work."]
+    cmd = [exe, "-C", str(ws), "resume", "--dangerously-skip-permissions", "--max-steps", "120", sid, "Continue the task from the checkpoint; do not redo completed work."]
     with open(workdir / "acceptance.log", "ab") as f:
         f.write(b"\n$ resume\n")
         rc2 = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, timeout=3600).returncode
