@@ -47,7 +47,7 @@ def parse_sse(lines: Any, on_event: Callable[[dict[str, Any]], None] | None = No
         try:
             ev = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise EngineError(f"Engine sent a malformed stream event: {exc}", "stream") from exc
+            raise EngineError(f"Engine sent a malformed stream event: {exc}", "stream", retryable=True) from exc
         kind = ev.get("type")
         if kind == "error":
             msg = str(ev.get("message"))
@@ -286,7 +286,7 @@ def classify_http(code: int, message: str) -> EngineError:
         return EngineError(f"Engine HTTP 404: {detail}", "http", code)
     if is_context_error(detail):
         return EngineError(f"Engine HTTP {code}: {detail}", "context", code)
-    if code in (429, 502, 503, 504):
+    if code in (429, 500, 502, 503, 504):
         return EngineError(f"Engine HTTP {code}: {detail}", "http", code, retryable=True, subkind="server_unavailable")
     return EngineError(f"Engine HTTP {code}: {detail}", "http", code)
 

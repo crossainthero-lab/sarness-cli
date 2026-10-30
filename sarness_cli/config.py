@@ -58,7 +58,7 @@ DEFAULTS: dict[str, Any] = {
     "max_steps": 60,
     "command_timeout_s": 120,
     "request_timeout_s": 300,
-    "retries": 3,
+    "retries": 6,
     "workspace": None,
     "show_reasoning": False,
     "log_level": "basic",        # off | basic | verbose

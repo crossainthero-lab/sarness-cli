@@ -29,7 +29,7 @@ def test_truncated_turn_is_discarded_nothing_executes_then_small_calls_work(tmp_
     sess.run(eng, "make a file", 6)
     assert not (root / "bad.txt").exists() and (root / "ok.txt").read_text() == "yes"
     assert sess.status == "completed" and transcript_is_valid(sess.messages)
-    assert "cut off while writing a tool call" in json.dumps(eng.history[1][-1])   # targeted guidance, names the tool
+    assert "hit the output limit while writing a write_file call" in json.dumps(eng.history[1][-1])   # targeted guidance, names the tool
 
 
 def test_reasoning_that_eats_the_budget_turns_thinking_off_next_turn(tmp_path):
@@ -41,9 +41,9 @@ def test_reasoning_that_eats_the_budget_turns_thinking_off_next_turn(tmp_path):
     assert sess.status == "completed"
 
 
-def test_three_truncations_block_with_actionable_message(tmp_path):
+def test_repeated_truncations_block_with_actionable_message(tmp_path):
     sess, _ = make_session(tmp_path)
-    eng = FakeEngine(*[result([call("write_file", {"path": "a", "content": "x"})], finish="length") for _ in range(3)])
+    eng = FakeEngine(*[result([call("write_file", {"path": "a", "content": "x"})], finish="length") for _ in range(5)])
     with pytest.raises(SessionBlocked, match="output limit"):
         sess.run(eng, "go", 10)
     assert sess.status == "blocked:length"
