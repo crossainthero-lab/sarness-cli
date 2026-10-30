@@ -10,6 +10,7 @@ Invariants (each has a regression test):
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 import secrets
@@ -27,6 +28,12 @@ from .tools import MUTATING, TOOL_NAMES, TOOLS, ToolArgError, Workspace, clipped
 
 MAX_CALLS_PER_TURN = 8
 SESSION_RE = re.compile(r"[0-9a-f]{20}")
+# Do not accept a promise of future tool work as a completed agent run.
+PENDING_ACTION = re.compile(
+    r"(?i)\b(?:let me|i(?:'ll| will)|i(?:'m| am) going to|next[, ]+i(?:'ll| will))\s+"
+    r"(?:now\s+)?(?:run|execute|test|benchmark|check|inspect|read|write|edit|change|"
+    r"install|build|start|launch|create|update|fix|fetch|verify|deploy|open|load)\b"
+)
 
 
 class SessionBlocked(RuntimeError):
@@ -62,7 +69,7 @@ class RunConfig:
     ctx: int = 32768
     gpu_layers: int | None = None
     pin_ctx: bool = False          # send ctx/gpu_layers so the engine never reloads a loaded model
-    max_steps: int = 60
+    max_steps: int = 0  # 0 = unlimited; repetition guards remain active
     retries: int = 3
     server: str = ""
     show_reasoning: bool = False
@@ -318,15 +325,18 @@ class Session:
             self.messages.append({"role": "user", "content": "Continue from the last checkpoint; inspect project status before making changes."})
         self.status = "running"
         self.save()
-        max_steps = max_steps or max(1, int(cfg.max_steps * EFFORT[cfg.effort]["steps"]))
+        if max_steps is None:
+            max_steps = max(1, int(cfg.max_steps * EFFORT[cfg.effort]["steps"])) if cfg.max_steps else 0
+        if max_steps < 0:
+            raise ValueError("max_steps must be nonnegative (0 = unlimited)")
         # consecutive-failure counters, each reset by a clean turn
         net_fail = length_fail = malformed = no_call = text_call = ctx_fail = 0
-        verify_nudges = review_nudges = fail_nudges = 0
+        verify_nudges = review_nudges = fail_nudges = pending_nudges = 0
         recent_sigs: list[str] = []
         recent_errors: list[str] = []
         recent_results: dict[str, int] = {}
         denials = 0
-        for step in range(1, max_steps + 1):
+        for step in (itertools.count(1) if max_steps == 0 else range(1, max_steps + 1)):
             guard = getattr(engine, "preflight", None)
             warning = guard(cfg) if guard else None
             if warning:
@@ -521,6 +531,16 @@ class Session:
                     self._nudge("That looked like a tool call written as text, which cannot be executed. Use the structured function-call interface.")
                     continue
                 no_call = text_call = 0
+                if PENDING_ACTION.search(content):
+                    pending_nudges += 1
+                    self.ui.notice("model promised an action but did not use a tool", "warn")
+                    if pending_nudges >= 3:
+                        self.status = "blocked:unfulfilled_action"
+                        self.save()
+                        raise SessionBlocked("The model repeatedly promised work without executing a tool. Switch to a tool-capable model or resume with a specific instruction.")
+                    self._nudge("You described a future action but did not execute it. Call a structured tool to do that work now, or explicitly explain why it cannot be done. Do not just describe the next action.")
+                    continue
+                pending_nudges = 0
                 if self.dirty and verify_nudges < 2:
                     verify_nudges += 1
                     self._nudge("You changed files since the last successful command. Run the tests/build now with run_command, or explain precisely why "
@@ -621,7 +641,7 @@ class Session:
                 raise Interrupted("cancelled during a tool call")
         self.status = "blocked:step_limit"
         self.save()
-        raise SessionBlocked(f"Step limit ({max_steps}) reached; session saved. Continue with 'sarness resume {self.id}' or raise --max-steps.")
+        raise SessionBlocked(f"Configured step limit ({max_steps}) reached; session saved. Continue with 'sarness resume {self.id}' or use --max-steps 0 for unlimited turns.")
 
     def _archive(self, removed: list[dict[str, Any]]) -> None:
         try:
