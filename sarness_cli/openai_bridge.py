@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -22,8 +23,11 @@ from .engine import EngineError
 MAX_BODY = 8 * 1024 * 1024
 
 
-def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: str) -> dict[str, Any]:
-    """Generate in-memory OpenCode 1.x provider configuration, including effort variants."""
+def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: str,
+                    major: int = 1) -> dict[str, Any]:
+    """Generate the explicitly versioned OpenCode provider configuration."""
+    if major not in {1, 2}:
+        raise ValueError(f"Unsupported OpenCode major version: {major}")
     catalog = {}
     for m in models:
         ref = str(m.get("ref") or "")
@@ -34,16 +38,40 @@ def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: s
             "name": str(m.get("name") or ref),
             "limit": {"context": ctx, "output": min(8192, max(1024, ctx // 4))},
         }
+        if major == 2:
+            model["modelID"] = ref
+            model["capabilities"] = {"tools": True, "input": ["text"], "output": ["text"]}
         if m.get("reasoning") is True:
-            model["variants"] = {
-                "low": {"reasoningEffort": "low"},
-                "medium": {"reasoningEffort": "medium"},
-                "high": {"reasoningEffort": "high"},
-                "max": {"reasoningEffort": "high"},
-            }
+            if major == 1:
+                model["variants"] = {
+                    "low": {"reasoningEffort": "low"},
+                    "medium": {"reasoningEffort": "medium"},
+                    "high": {"reasoningEffort": "high"},
+                    "max": {"reasoningEffort": "high"},
+                }
+            else:
+                model["capabilities"]["reasoning"] = {"supported": True, "effort": ["low", "medium", "high"]}
+                model["variants"] = [
+                    {"id": effort, "settings": {"reasoningEffort": "high" if effort == "max" else effort}}
+                    for effort in ("low", "medium", "high", "max")
+                ]
         catalog[ref] = model
     if default not in catalog:
         raise ValueError(f"The selected Sarness model {default!r} is unavailable")
+    if major == 2:
+        return {
+            "$schema": "https://opencode.ai/config.json",
+            "model": f"sarness/{default}",
+            "providers": {
+                "sarness": {
+                    "name": "Sarness Engine",
+                    "env": ["SARNESS_BRIDGE_API_KEY"],
+                    "package": "@opencode/ai/providers/openai-compatible",
+                    "settings": {"baseURL": url, "apiKey": key, "headerTimeout": 600000, "chunkTimeout": False},
+                    "models": catalog,
+                }
+            },
+        }
     return {
         "$schema": "https://opencode.ai/config.json",
         "model": f"sarness/{default}",
@@ -56,6 +84,17 @@ def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: s
             }
         },
     }
+
+
+def opencode_major(version_text: str) -> int:
+    """Fail closed when the installed OpenCode version cannot be identified."""
+    match = re.search(r"(?<![0-9])([0-9]+)\.[0-9]+(?:\.[0-9]+)?", version_text)
+    if not match:
+        raise RuntimeError(f"Cannot identify OpenCode version from {version_text!r}")
+    major = int(match.group(1))
+    if major not in (1, 2):
+        raise RuntimeError(f"OpenCode {version_text.strip()} is not validated by the Sarness bridge")
+    return major
 
 
 class BridgeServer(ThreadingHTTPServer):
@@ -260,13 +299,19 @@ def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, wo
     """Launch OpenCode TUI against a temporary, authenticated, loopback-only bridge."""
     if not shutil.which("opencode"):
         raise RuntimeError("OpenCode is not installed. Install from https://opencode.ai/, then retry.")
+    version = subprocess.check_output(["opencode", "--version"], text=True, timeout=10).strip()
+    major = opencode_major(version)
     bridge = BridgeServer(engine, models)
     bridge.start()
     try:
-        cfg = opencode_config(bridge.url, models, selected, bridge.key)
+        cfg = opencode_config(bridge.url, models, selected, bridge.key, major=major)
         env = os.environ.copy()
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(cfg)
-        cmd = ["opencode", "--model", f"sarness/{selected}"]
+        env["SARNESS_BRIDGE_API_KEY"] = bridge.key
+        # OpenCode v2 normally uses a shared persistent service that won't inherit
+        # our per-launch model endpoint or access key. --standalone is essential.
+        cmd = ["opencode"] + (["--standalone"] if major == 2 else [])
+        cmd += ["--model", f"sarness/{selected}"]
         if auto:
             cmd.append("--auto")
         return subprocess.call(cmd, cwd=workspace, env=env)
