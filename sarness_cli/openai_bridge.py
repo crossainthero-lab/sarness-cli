@@ -182,6 +182,22 @@ class _Handler(BaseHTTPRequestHandler):
         if effort in {"low", "medium", "high", "max"}:
             params["thinking"] = effort != "low"
 
+        # The engine can reload a model when ctx/gpu_layers are omitted or differ.
+        # Pin its live parameters and refuse implicit model swaps behind OpenCode.
+        if model.startswith("local:"):
+            try:
+                live = self.server.engine.llm_status()
+            except EngineError as exc:
+                self._error(502, f"Cannot inspect the loaded model: {exc}")
+                return
+            if live.get("state") != "ready" or f"local:{live.get('model_id')}" != model:
+                self._error(409, "Selected model is no longer loaded; use sarness cabinet to load it explicitly")
+                return
+            if live.get("ctx"):
+                params["ctx"] = int(live["ctx"])
+            if live.get("gpu_layers") is not None:
+                params["gpu_layers"] = live["gpu_layers"]
+
         streaming = data.get("stream") is True
         ident = "chatcmpl-" + secrets.token_hex(12)
         sent_content = False
