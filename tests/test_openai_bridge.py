@@ -5,7 +5,7 @@ import urllib.request
 
 import pytest
 
-from sarness_cli.openai_bridge import BridgeServer, opencode_config
+from sarness_cli.openai_bridge import BridgeServer, opencode_config, opencode_major
 
 
 MODEL = {"ref": "local:qwen-test", "name": "Qwen test", "local": True,
@@ -109,3 +109,30 @@ def test_bridge_rejects_unlisted_model(bridge):
         request(server, "/chat/completions", {"model": "local:other", "messages": [], "stream": False})
     assert exc.value.code == 400
     assert not engine.calls
+
+def test_opencode_v2_provider_model_and_effort_schema():
+    cfg = opencode_config("http://127.0.0.1:9922/v1", [MODEL], MODEL["ref"], "temporary-key", major=2)
+    provider = cfg["providers"]["sarness"]
+    assert cfg["model"] == "sarness/local:qwen-test"
+    assert provider["package"] == "@opencode/ai/providers/openai-compatible"
+    assert provider["settings"]["apiKey"] == "temporary-key"
+    assert provider["env"] == ["SARNESS_BRIDGE_API_KEY"]
+    entry = provider["models"][MODEL["ref"]]
+    assert entry["modelID"] == MODEL["ref"]
+    assert entry["capabilities"]["tools"] is True
+    assert entry["variants"][2]["id"] == "high"
+    assert entry["variants"][2]["settings"]["reasoningEffort"] == "high"
+
+
+def test_opencode_version_identification_is_explicit():
+    assert opencode_major("opencode 1.2.3") == 1
+    assert opencode_major("2.0.1") == 2
+    with pytest.raises(RuntimeError, match="Cannot identify"):
+        opencode_major("unparseable")
+    with pytest.raises(RuntimeError, match="not validated"):
+        opencode_major("3.0.0")
+
+
+def test_openai_bridge_rejects_unknown_provider_major():
+    with pytest.raises(ValueError, match="Unsupported OpenCode"):
+        opencode_config("http://127.0.0.1:9922/v1", [MODEL], MODEL["ref"], "temporary-key", major=3)
