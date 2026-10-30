@@ -641,7 +641,7 @@ class Session:
                 raise Interrupted("cancelled during a tool call")
         self.status = "blocked:step_limit"
         self.save()
-        raise SessionBlocked(f"Configured step limit ({max_steps}) reached; session saved. Continue with 'sarness resume {self.id}' or use --max-steps 0 for unlimited turns.")
+        raise SessionBlocked(f"Step limit ({max_steps}) reached; session saved. Continue with 'sarness resume {self.id}' or use --max-steps 0 for unlimited turns.")
 
     def _archive(self, removed: list[dict[str, Any]]) -> None:
         try:
