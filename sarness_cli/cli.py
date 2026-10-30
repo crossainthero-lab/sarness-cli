@@ -18,6 +18,7 @@ from .connection import Connection, LiveEngine, find_profile, get_profile
 from .engine import EngineError, explain_engine_error
 from .menu import select_model
 from .modelinfo import cache_models, load_cached_models, record_probe
+from .openai_bridge import launch_opencode
 from .repl import Repl
 from .runtime import ModelError, Prepared, build_run_config, describe_model, prepare_model, resolve_model
 from .setup import doctor, run_setup
@@ -25,7 +26,7 @@ from .tools import Workspace
 from .ui import Console, banner_bypass
 from .policy import EffectivePermissions
 
-COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet"}
+COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet", "opencode"}
 
 
 def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     up = sp.add_parser("upgrade", parents=[parents], help="Reinstall from the recorded source directory"); up.add_argument("--pull", action="store_true")
     cab = sp.add_parser("cabinet", parents=[parents], help="Inspect server memory, view and load/unload models")
     cab.add_argument("subcommand", nargs="*", help="status, unload, release, load <id>, refresh")
+    sp.add_parser("opencode", parents=[parents], help="OpenCode TUI using Sarness Engine inference (experimental)")
     return parser
 
 
@@ -562,6 +564,39 @@ def handle_resume(target_id: str | None, a: argparse.Namespace, prompt: str | No
     return start_session(a, prompt, resume_id=sid)
 
 
+def cmd_opencode(a: argparse.Namespace) -> int:
+    """Keep Sarness Engine on the Spark; let OpenCode run local coding tools and TUI."""
+    workspace = resolve_workspace(a)
+    settings, _ = effective_settings(workspace, overrides(a))
+    name, conn = open_connection(a, settings)
+    try:
+        engine = conn.connect()
+        engine.health()
+        models = engine.models()
+        status = engine.llm_status()
+        loaded_id = status.get("model_id")
+        preferred = settings.get("model") or (f"local:{loaded_id}" if loaded_id else None)
+        if not preferred:
+            raise ConfigError("No selected or loaded model. Run sarness model <id> or specify --model.")
+        try:
+            selected = resolve_model(models, preferred)
+        except ModelError as exc:
+            raise ConfigError(str(exc)) from exc
+        if selected.get("local"):
+            if status.get("state") != "ready" or f"local:{loaded_id}" != selected["ref"]:
+                raise ConfigError("OpenCode bridge only uses the already-loaded local model to avoid evicting other clients. Load it first with sarness cabinet load <model>.")
+        print(f"Sarness Engine: {name}  |  model: {selected['ref']}  |  OpenCode tools: local", file=sys.stderr)
+        if getattr(a, "dangerously_skip_permissions", False):
+            print("Note: --dangerously-skip-permissions maps to OpenCode --auto; OpenCode controls its own tool permissions.", file=sys.stderr)
+        try:
+            return launch_opencode(engine, models, selected["ref"], workspace,
+                                   auto=getattr(a, "dangerously_skip_permissions", False))
+        except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError(f"Cannot launch OpenCode: {exc}") from exc
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     a = parser.parse_args(argv)
@@ -586,6 +621,8 @@ def main(argv: list[str] | None = None) -> None:
             code = cmd_upgrade(a)
         elif cmd == "cabinet":
             code = cmd_cabinet(a)
+        elif cmd == "opencode":
+            code = cmd_opencode(a)
         elif cmd == "run":
             code = start_session(a, " ".join(a.prompt).strip() or None)
         elif cmd == "resume":
