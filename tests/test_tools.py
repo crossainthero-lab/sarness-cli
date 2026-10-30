@@ -123,3 +123,12 @@ def test_plan_tool(tmp_path):
     assert ws.plan == [{"text": "a", "status": "doing"}]
     with pytest.raises(ValueError):
         ws.execute("update_plan", {"items": [{"text": "a", "status": "weird"}]})
+
+def test_search_and_read_handle_multimegabyte_text_without_silent_skip(tmp_path):
+    ws, root = ws_for(tmp_path)
+    log = root / "benchmark.log"
+    log.write_text(("repeated log message\n" * 250000) + "BENCHMARK_COMPLETE\n", encoding="utf-8")
+    matches = ws.execute("search", {"pattern": "BENCHMARK_COMPLETE", "path": "benchmark.log"})
+    assert "benchmark.log:250001:" in matches
+    excerpt = ws.execute("read_file", {"path": "benchmark.log", "offset": 250001, "limit": 5})
+    assert "250001: BENCHMARK_COMPLETE" in excerpt

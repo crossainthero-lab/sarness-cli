@@ -301,3 +301,36 @@ def test_ctrl_c_at_an_approval_prompt_aborts_the_task_instead_of_denying(tmp_pat
         sess.run(eng, "go", 3)
     assert not (root / "a").exists() and not (root / "b").exists() and transcript_is_valid(sess.messages)
     assert sess.status == "interrupted"
+
+def test_unlimited_steps_can_reach_completion_after_60_turns(tmp_path):
+    sess, _ = make_session(tmp_path, max_steps=0)
+    turns = [
+        result([call("update_plan", {"items": [{"text": f"step {i}", "status": "doing"}]}, f"step{i}")])
+        for i in range(66)
+    ]
+    engine = FakeEngine(*turns, result(content="all steps finished"))
+    assert sess.run(engine, "complete the long plan") == "all steps finished"
+    assert sess.stats.turns == 67
+    assert sess.status == "completed"
+    assert transcript_is_valid(sess.messages)
+
+
+def test_promise_to_act_is_not_misreported_as_completed_work(tmp_path):
+    sess, _ = make_session(tmp_path)
+    engine = FakeEngine(
+        result(content="Good, the server is running. Let me run the benchmark."),
+        result([call("run_command", {"command": "echo benchmark-ran"})]),
+        result(content="Benchmark command completed."),
+    )
+    assert sess.run(engine, "run a benchmark", 5) == "Benchmark command completed."
+    assert len(engine.history) == 3
+    assert any("described a future action" in m["content"] for m in sess.messages if m["role"] == "user")
+    assert sess.commands and sess.commands[0]["exit"] == 0
+
+
+def test_repeated_unfulfilled_promises_block_without_claiming_completion(tmp_path):
+    sess, _ = make_session(tmp_path)
+    engine = FakeEngine(*[result(content="I'll now run the benchmark.") for _ in range(3)])
+    with pytest.raises(SessionBlocked, match="promised work"):
+        sess.run(engine, "run benchmark", 5)
+    assert sess.status == "blocked:unfulfilled_action"

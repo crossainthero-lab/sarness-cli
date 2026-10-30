@@ -39,7 +39,7 @@ def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
                    help="Unrestricted execution: skip all Sarness permission approvals and denials (OS permissions still apply)")
     p.add_argument("-C", "--workspace", default=d, help="Project folder on THIS computer (default: current directory)")
     p.add_argument("--max-tokens", type=int, default=d, help="Maximum output tokens per model turn")
-    p.add_argument("--max-steps", type=int, default=d, help="Maximum model turns per task")
+    p.add_argument("--max-steps", type=int, default=d, help="Maximum model turns per task (0 = unlimited; default: unlimited)")
     p.add_argument("--allow-insecure-http", action="store_true", default=d if suppress else False, help="Permit cleartext remote HTTP (token exposure risk)")
     p.add_argument("--allow-model-swap", action="store_true", default=d if suppress else False,
                    help="Allow loading a model over a different loaded one (it unloads for everyone)")

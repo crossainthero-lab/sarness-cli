@@ -343,13 +343,23 @@ class Workspace:
 
     def _t_read_file(self, a: dict[str, Any]) -> str:
         p = self.resolve(a["path"])
-        lines = self._read_text(p).splitlines()
+        if not p.is_file():
+            raise FileNotFoundError(f"{self._shown_path(p)} is not a file")
+        with p.open("rb") as raw:
+            if b"\0" in raw.read(8192):
+                raise ValueError("Binary file; not readable as text")
         first = max(1, a.get("offset", 1))
         limit = min(400, max(1, a.get("limit", 150)))
-        last = min(len(lines), first + limit - 1)
-        body = "\n".join(f"{n + 1}: {lines[n]}" for n in range(first - 1, last))
-        more = f"\n[{len(lines) - last} more lines; call read_file with offset={last + 1}]" if last < len(lines) else ""
-        return clipped(f"{a['path']} lines {first}-{last}/{len(lines)}\n{body}", self.result_cap) + more
+        selected = []
+        count = 0
+        # Iterate rather than load the entire file. Even a multi-megabyte log is readable.
+        with p.open("r", encoding="utf-8") as src:
+            for count, line in enumerate(src, 1):
+                if first <= count < first + limit:
+                    selected.append(f"{count}: {line.rstrip(chr(10)).rstrip(chr(13))}")
+        last = min(count, first + limit - 1)
+        more = f"\n[{count - last} more lines; call read_file with offset={last + 1}]" if count > last else ""
+        return clipped(f"{a['path']} lines {first}-{last}/{count}\n" + "\n".join(selected), self.result_cap) + more
 
     def _t_search(self, a: dict[str, Any]) -> str:
         try:
@@ -361,13 +371,16 @@ class Workspace:
         results: list[str] = []
         for f in files:
             try:
-                if not f.is_file() or f.stat().st_size > 500_000:
+                if not f.is_file():
                     continue
-                for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                    if regex.search(line):
-                        results.append(f"{self._shown_path(f)}:{i}: {line[:300]}")
-                        if len(results) >= 100:
-                            return clipped("\n".join(results) + "\n[first 100 matches]", self.result_cap)
+                # Stream text; silently skipping >500KB files hid matches in real projects.
+                with f.open("r", encoding="utf-8", errors="replace") as src:
+                    for i, line in enumerate(src, 1):
+                        if regex.search(line):
+                            results.append(f"{self._shown_path(f)}:{i}: {line[:300]}")
+                            if len(results) >= 100:
+                                return clipped("\n".join(results) + "\n[first 100 matches]", self.result_cap)
+
             except (OSError, UnicodeError):
                 continue
         return clipped("\n".join(results) or "No matches", self.result_cap)
