@@ -234,9 +234,8 @@ use `sarness cabinet load MODEL_ID` to load a different model explicitly.
 
 OpenCode's tools, sessions and permission policy belong to **OpenCode**, not the
 Sarness native agent. In this mode `--dangerously-skip-permissions` maps to
-OpenCode's `--auto` option, not Sarness's native bypass guarantees. Choose
-the upstream OpenCode version deliberately; the adapter currently generates
-OpenCode 1.x provider configuration. The bridge has automated mock-engine tests,
+OpenCode's `--auto` option, not Sarness's native bypass guarantees. The launcher detects installed OpenCode 1.x versus 2.x; v2 runs with a private
+standalone server to inherit the per-launch local endpoint and credentials. The bridge has automated mock-engine tests,
 but live OpenCode + DGX Spark acceptance is still required.
 
 The native `sarness` TUI remains available and unchanged by this integration.
