@@ -578,15 +578,21 @@ def cmd_opencode(a: argparse.Namespace) -> int:
         preferred = settings.get("model") or (f"local:{loaded_id}" if loaded_id else None)
         if not preferred:
             raise ConfigError("No selected or loaded model. Run sarness model <id> or specify --model.")
-        selected = resolve_model(models, preferred)
+        try:
+            selected = resolve_model(models, preferred)
+        except ModelError as exc:
+            raise ConfigError(str(exc)) from exc
         if selected.get("local"):
             if status.get("state") != "ready" or f"local:{loaded_id}" != selected["ref"]:
                 raise ConfigError("OpenCode bridge only uses the already-loaded local model to avoid evicting other clients. Load it first with sarness cabinet load <model>.")
         print(f"Sarness Engine: {name}  |  model: {selected['ref']}  |  OpenCode tools: local", file=sys.stderr)
         if getattr(a, "dangerously_skip_permissions", False):
             print("Note: --dangerously-skip-permissions maps to OpenCode --auto; OpenCode controls its own tool permissions.", file=sys.stderr)
-        return launch_opencode(engine, models, selected["ref"], workspace,
-                               auto=getattr(a, "dangerously_skip_permissions", False))
+        try:
+            return launch_opencode(engine, models, selected["ref"], workspace,
+                                   auto=getattr(a, "dangerously_skip_permissions", False))
+        except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError(f"Cannot launch OpenCode: {exc}") from exc
     finally:
         conn.close()
 
