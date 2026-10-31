@@ -1,6 +1,7 @@
 """A real HTTP/SSE server speaking the engine's agent API, scripted per test."""
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = "test-token-1234567890abcdef"
@@ -23,6 +24,8 @@ class FakeEngineServer:
         self.llm = llm_status or {"state": "stopped", "model_id": None, "ctx": 8192, "gpu_layers": 999, "active_streams": 0, "last_used": 0}
         self.models_registry = [dict(m) for m in (registry or REGISTRY)]
         self.busy = False
+        self.disconnects = 0                 # streams the client closed before the server finished them
+        self.lock = threading.Lock()
         outer = self
 
         self.system_data = system_data or {
@@ -133,21 +136,35 @@ class FakeEngineServer:
 
                 outer.completions.append(body)
                 events = outer.turns.pop(0)
+                if callable(events):              # lazy turn: a generator, so a test can stream slowly and be cancelled
+                    events = events(body)
                 if events == "http500":
                     return self._json({"detail": "boom"}, 500)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                for ev in events:
-                    if ev == "DROP":              # server vanishes mid-stream: no `done` event, connection closed
+                with outer.lock:
+                    outer.llm["active_streams"] = int(outer.llm.get("active_streams") or 0) + 1
+                try:
+                    for ev in events:
+                        if ev == "DROP":              # server vanishes mid-stream: no `done` event, connection closed
+                            self.wfile.flush()
+                            self.connection.shutdown(2)
+                            return
+                        if isinstance(ev, (int, float)):   # pause (seconds) between events, to model a slow generation
+                            time.sleep(ev)
+                            continue
+                        if isinstance(ev, str):       # raw (possibly corrupt) SSE payload
+                            self.wfile.write(("data: " + ev + "\n\n").encode())
+                        else:
+                            self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
                         self.wfile.flush()
-                        self.connection.shutdown(2)
-                        return
-                    if isinstance(ev, str):       # raw (possibly corrupt) SSE payload
-                        self.wfile.write(("data: " + ev + "\n\n").encode())
-                    else:
-                        self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
-                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    with outer.lock:                  # the real engine releases the stream when the client goes away
+                        outer.disconnects += 1
+                finally:
+                    with outer.lock:
+                        outer.llm["active_streams"] = max(0, int(outer.llm.get("active_streams") or 0) - 1)
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()

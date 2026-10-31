@@ -24,7 +24,7 @@ The `sarness` Python CLI stays the entry point. It resolves settings and permiss
 the workspace. That process gets the generated config (the Sarness provider only, the permission rules, the effort
 variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, `SARNESS_BIN`, `SARNESS_VERSION`).
 
-## Fork delta (6 commits: 4 changes plus 2 upstream test adaptations, all marked `SARNESS:` in the source)
+## Fork delta (7 commits: 5 changes plus 2 upstream test adaptations, all marked `SARNESS:` in the source)
 
 | area | change |
 | --- | --- |
@@ -37,6 +37,7 @@ variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, 
 | home | SARNESS wordmark (3 rows) top-left, a muted tagline, and the composer at the bottom. The footer shows the `sarness` version. The exit screen and `run` splash use the Sarness mark |
 | commands | `/cabinet` suspends the TUI and runs the real `sarness cabinet` (then Enter returns). `/connect` explains that models come only from Sarness Engine. Cloud "free models" onboarding is removed |
 | effort | the launch config's variant (your `--effort`/setting) starts each new session until you pick one with `ctrl+t` |
+| ctrl+c | `app.tsx`, `component/prompt/index.tsx`, `config/keybind.ts` (patch 0007): the first press cancels running work, else clears, else exits; works during startup (see below) |
 
 Sessions from 0.3.x (stock OpenCode storage) are copied per project with `sarness tui migrate`: upstream's own
 `session list|export --standalone` on the OpenCode side and `session import --standalone` on the Sarness side. The
@@ -45,6 +46,28 @@ Sessions from 0.3.x (stock OpenCode storage) are copied per project with `sarnes
 Not changed: the agent loop, tools, sessions, compaction, undo, subagents, MCP, skills, permissions engine, server,
 protocol and internal package names (`@opencode/*`). Project-level `.opencode/` directories and `AGENTS.md` are still
 read, as upstream does.
+
+## Ctrl+C
+
+One press always does one visible thing, the first that applies:
+
+| situation | first Ctrl+C |
+| --- | --- |
+| a dialog, menu or permission prompt is open | closes it (rejects the permission) |
+| the model is generating, or the agent is running tools | cancels the turn: the Engine stream is released, the agent's shell command is stopped, a "Cancelled" notice appears, you are at the prompt; what you were typing is kept |
+| a `!` command you started is running | stops that command (its process group gets SIGTERM, then SIGKILL after 3 s) and nothing else |
+| idle, text in the composer | clears the composer |
+| idle, composer empty | exits cleanly |
+| the app is still starting | exits |
+
+`esc` twice remains the deliberate interrupt (it can resume queued steering). Commands the agent started in the
+background (a dev server) are not touched by Ctrl+C; they end when you exit. A cancelled session is saved and resumes
+with `sarness code --session …`; the interrupted tool call is recorded as interrupted and is never re-run.
+
+Why this needed a fix: in raw mode the kernel does not turn Ctrl+C into SIGINT, so the program must read the key itself.
+Until its keymap mounted the terminal program did not, and the key was dropped. The renderer's own exit-on-Ctrl+C
+covers that window now, and the keymap takes over once the app is up. Regression tests drive a real pseudo-terminal
+(`tests/test_ctrl_c_tui.py`).
 
 ## Honesty notes
 
@@ -57,7 +80,7 @@ read, as upstream does.
 
 ## Platforms
 
-Linux x64: built, installed and tested. Linux arm64: same recipe (pinned arm64 Bun), untested. macOS and Windows:
+Linux x64: built, installed and tested. Linux arm64: same recipe (pinned arm64 Bun), built and tested on a DGX Spark from 0.4.1 (see the changelog). macOS and Windows:
 not supported by the build recipe.
 
 ## Upstream tests
