@@ -95,3 +95,17 @@ loaded for comparison: that would have evicted the loaded model on a shared Spar
 Bugs this acceptance found in the guard itself (all fixed and covered by tests): a compaction request flattens the history into one
 user-role message of transcript text, which was being read as the user's words (and could have widened the scope); a call the user
 declined at an approval prompt was recorded as having run.
+
+
+## 0.4.2 installation record (2026-11-01)
+
+| | desktop (x86-64) | DGX Spark (aarch64) |
+| --- | --- | --- |
+| CLI | `sarness-cli 0.4.2` (pipx, from the v0.4.2 checkout) | `sarness-cli 0.4.2` (pipx, `~/sarness-cli` at tag v0.4.2) |
+| terminal | `sarness-tui v2.0.32`, ELF x86-64, build `0.4.2-2.0.32-107a7bddd471` | `sarness-tui v2.0.32`, ELF ARM aarch64, the same build id (same patch series), built on the Spark under `nice 19`, a 10 GB memory cap, a 6-CPU quota and a watchdog that never fired |
+| rollback | `previous` -> `0.4.1-2.0.32-29ef68a398b0`; the pure 0.4.1 build `...d9366734e488` and the 0.4.0 builds are still on disk | `previous` -> `0.4.1-2.0.32-d9366734e488` |
+| kept | config, secrets, `install.json`, sessions (a separate OpenCode install untouched) | config, secrets, `install.json`; no Spark service was stopped, restarted or modified |
+
+One packaging trap found on the way: installing from a clone with a stale untracked `build/` directory made setuptools ship a
+superseded patch file next to its replacement, so the terminal build refused to apply the series. Remove `build/` before
+`pipx install --force .` from a checkout (the tag and the wheel built by CI are correct).

@@ -28,7 +28,7 @@ def test_autocompact_installed_and_resumed(tmp_path, subcommand, default):
     config.save_config(cfg)
     work = tmp_path / "work"
     work.mkdir()
-    env = dict(os.environ, TERM="xterm-256color", XDG_DATA_HOME=str(tmp_path / "data"),
+    env = dict(os.environ, TERM="xterm-256color", SARNESS_TUI_BIN=TUI, XDG_DATA_HOME=str(tmp_path / "data"),
                XDG_CACHE_HOME=str(tmp_path / "cache"))
     sessions = []
 
@@ -116,7 +116,7 @@ def test_installed_runtime_switches_real_compaction(tmp_path):
     config.save_config(cfg)
     work = tmp_path / "work"
     work.mkdir()
-    env = dict(os.environ, TERM="xterm-256color", XDG_DATA_HOME=str(tmp_path / "data"), XDG_CACHE_HOME=str(tmp_path / "cache"))
+    env = dict(os.environ, TERM="xterm-256color", SARNESS_TUI_BIN=TUI, XDG_DATA_HOME=str(tmp_path / "data"), XDG_CACHE_HOME=str(tmp_path / "cache"))
     p = PtySession([str(binary), "-C", str(work), "code"], env=env, cwd=str(work), rows=40, cols=120)
     def submit(text):
         p.type(text)
