@@ -55,23 +55,25 @@ DEFAULTS: dict[str, Any] = {
     "permissions": "auto",
     "max_output_tokens": None,   # None: derived from effort
     "context_tokens": None,      # None: whatever the engine has loaded / the model default
-    "max_steps": 60,
+    "max_steps": 0,           # 0 = unlimited; safety via loop detection
     "command_timeout_s": 120,
     "request_timeout_s": 300,
-    "retries": 3,
+    "retries": 6,
     "workspace": None,
     "show_reasoning": False,
     "log_level": "basic",        # off | basic | verbose
     "session_dir": None,
+    "runtime": "native",         # native | opencode (OpenCode TUI over the authenticated Sarness bridge)
 }
 # Setting -> (validator description, check)
 _CHECKS = {
     "effort": lambda v: v in EFFORTS,
+    "runtime": lambda v: v in ("native", "opencode"),
     "thinking": lambda v: v in THINKING,
     "permissions": lambda v: v in SAVEABLE_MODES,
     "log_level": lambda v: v in ("off", "basic", "verbose"),
     "show_reasoning": lambda v: isinstance(v, bool),
-    "max_steps": lambda v: isinstance(v, int) and 1 <= v <= 1000,
+    "max_steps": lambda v: type(v) is int and 0 <= v <= 1_000_000,
     "command_timeout_s": lambda v: isinstance(v, int) and 1 <= v <= 3600,
     "request_timeout_s": lambda v: isinstance(v, int) and 10 <= v <= 3600,
     "retries": lambda v: isinstance(v, int) and 0 <= v <= 10,
@@ -137,6 +139,8 @@ def coerce_setting(key: str, text: str) -> Any:
         if text.lower() not in {"true", "false", "on", "off", "1", "0"}:
             raise ConfigError(f"{key} must be true or false")
         return validate_setting(key, text.lower() in {"true", "on", "1"})
+    if key == "max_steps" and text.lower() in {"unlimited", "infinite", "inf"}:
+        return 0
     if key in {"max_steps", "command_timeout_s", "request_timeout_s", "retries", "max_output_tokens", "context_tokens"}:
         try:
             return validate_setting(key, int(text))

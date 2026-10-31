@@ -17,8 +17,8 @@ from typing import Any, Callable
 
 from . import policy
 
-MAX_WRITE = 120_000          # chars in one write_file call (a soft guide of ~8k is given to the model)
-MAX_APPEND = 12_000
+MAX_WRITE = 250_000          # chars in one write_file call that arrived intact (the model is told a much smaller chunk size)
+MAX_APPEND = 250_000
 IGNORE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", ".pytest_cache", ".mypy_cache"}
 PLACEHOLDER = re.compile(
     r"(?im)^\s*(?:#|//|/\*|<!--|--)?\s*\.\.\.\s*(?:rest|remaining|existing|other|previous|unchanged|same)\b.*$"
@@ -56,7 +56,7 @@ TOOLS: list[dict[str, Any]] = [
     _tool("search", "Regex search across files (respects .gitignore in normal modes; includes protected/ignored files in bypass). Bounded results.", ["pattern"],
           pattern=S("Python regular expression"), path=S("Relative folder or file (default .)")),
     _tool("find_files", "Find files by glob pattern, e.g. '*.py' or 'src/**/test_*.py'.", ["pattern"], pattern=S("Glob pattern")),
-    _tool("write_file", "Create or replace a whole file. Keep each call under ~8000 characters; for larger files write the first part "
+    _tool("write_file", "Create or replace a whole file. Keep each call to a few thousand characters (the system prompt gives the exact limit); for larger files write the first part "
           "then add the rest with append_file. Never use placeholders such as '... rest unchanged'.", ["path", "content"],
           path=S("Relative path"), content=S("Complete contents of this file (or its first part)")),
     _tool("append_file", "Append the next chunk to a file. Only applies if the file's current length equals expected_length, so a "
@@ -343,13 +343,27 @@ class Workspace:
 
     def _t_read_file(self, a: dict[str, Any]) -> str:
         p = self.resolve(a["path"])
-        lines = self._read_text(p).splitlines()
+        if not p.is_file():
+            raise FileNotFoundError(f"{self._shown_path(p)} is not a file")
+        with p.open("rb") as raw:
+            if b"\0" in raw.read(8192):
+                raise ValueError("Binary file; not readable as text")
         first = max(1, a.get("offset", 1))
         limit = min(400, max(1, a.get("limit", 150)))
-        last = min(len(lines), first + limit - 1)
-        body = "\n".join(f"{n + 1}: {lines[n]}" for n in range(first - 1, last))
-        more = f"\n[{len(lines) - last} more lines; call read_file with offset={last + 1}]" if last < len(lines) else ""
-        return clipped(f"{a['path']} lines {first}-{last}/{len(lines)}\n{body}", self.result_cap) + more
+        selected = []
+        count = 0
+        # Iterate rather than load the entire file. Even a multi-megabyte log is readable.
+        # errors="replace": a stray Latin-1 byte must not make a whole log unreadable.
+        with p.open("r", encoding="utf-8", errors="replace") as src:
+            for count, line in enumerate(src, 1):
+                if first <= count < first + limit:
+                    line = line.rstrip("\n").rstrip("\r")
+                    if len(line) > 2000:   # one minified line must not flood the context
+                        line = line[:2000] + f" [... {len(line) - 2000} more chars on this line]"
+                    selected.append(f"{count}: {line}")
+        last = min(count, first + limit - 1)
+        more = f"\n[{count - last} more lines; call read_file with offset={last + 1}]" if count > last else ""
+        return clipped(f"{a['path']} lines {first}-{last}/{count}\n" + "\n".join(selected), self.result_cap) + more
 
     def _t_search(self, a: dict[str, Any]) -> str:
         try:
@@ -359,18 +373,27 @@ class Workspace:
         base = self.resolve(a.get("path", "."))
         files = [base] if base.is_file() else self._candidates(base)
         results: list[str] = []
+        skipped_binary = 0
         for f in files:
             try:
-                if not f.is_file() or f.stat().st_size > 500_000:
+                if not f.is_file():
                     continue
-                for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                    if regex.search(line):
-                        results.append(f"{self._shown_path(f)}:{i}: {line[:300]}")
-                        if len(results) >= 100:
-                            return clipped("\n".join(results) + "\n[first 100 matches]", self.result_cap)
+                with f.open("rb") as raw:
+                    if b"\0" in raw.read(8192):
+                        skipped_binary += 1
+                        continue
+                # Stream text; silently skipping >500KB files hid matches in real projects.
+                with f.open("r", encoding="utf-8", errors="replace") as src:
+                    for i, line in enumerate(src, 1):
+                        if regex.search(line):
+                            results.append(f"{self._shown_path(f)}:{i}: {line[:300]}")
+                            if len(results) >= 100:
+                                return clipped("\n".join(results) + "\n[first 100 matches]", self.result_cap)
+
             except (OSError, UnicodeError):
                 continue
-        return clipped("\n".join(results) or "No matches", self.result_cap)
+        note = f"\n[{skipped_binary} binary file(s) not searched]" if skipped_binary else ""
+        return clipped("\n".join(results) or "No matches", self.result_cap) + note
 
     def _t_find_files(self, a: dict[str, Any]) -> str:
         pat = a["pattern"]
@@ -389,7 +412,7 @@ class Workspace:
         p = self.resolve(a["path"], write=True)
         content = a["content"]
         if len(content) > MAX_WRITE:
-            raise ValueError(f"Content is {len(content)} characters; write at most ~8000 per call, then use append_file for the rest")
+            raise ValueError(f"Content is {len(content)} characters; write the first part (a few thousand characters), then use append_file for the rest")
         self._check_placeholders(content)
         old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
         if old == content:

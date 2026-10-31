@@ -18,6 +18,7 @@ from .connection import Connection, LiveEngine, find_profile, get_profile
 from .engine import EngineError, explain_engine_error
 from .menu import select_model
 from .modelinfo import cache_models, load_cached_models, record_probe
+from .openai_bridge import launch_opencode
 from .repl import Repl
 from .runtime import ModelError, Prepared, build_run_config, describe_model, prepare_model, resolve_model
 from .setup import doctor, run_setup
@@ -25,7 +26,7 @@ from .tools import Workspace
 from .ui import Console, banner_bypass
 from .policy import EffectivePermissions
 
-COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet"}
+COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet", "opencode", "code"}
 
 
 def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
@@ -39,7 +40,7 @@ def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
                    help="Unrestricted execution: skip all Sarness permission approvals and denials (OS permissions still apply)")
     p.add_argument("-C", "--workspace", default=d, help="Project folder on THIS computer (default: current directory)")
     p.add_argument("--max-tokens", type=int, default=d, help="Maximum output tokens per model turn")
-    p.add_argument("--max-steps", type=int, default=d, help="Maximum model turns per task")
+    p.add_argument("--max-steps", type=int, default=d, help="Maximum model turns per task (0 = unlimited; default: unlimited)")
     p.add_argument("--allow-insecure-http", action="store_true", default=d if suppress else False, help="Permit cleartext remote HTTP (token exposure risk)")
     p.add_argument("--allow-model-swap", action="store_true", default=d if suppress else False,
                    help="Allow loading a model over a different loaded one (it unloads for everyone)")
@@ -83,6 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     up = sp.add_parser("upgrade", parents=[parents], help="Reinstall from the recorded source directory"); up.add_argument("--pull", action="store_true")
     cab = sp.add_parser("cabinet", parents=[parents], help="Inspect server memory, view and load/unload models")
     cab.add_argument("subcommand", nargs="*", help="status, unload, release, load <id>, refresh")
+    for name, text in (("code", "Coding agent on the OpenCode runtime, inference on Sarness Engine"),
+                       ("opencode", "Alias of 'code'")):
+        oc = sp.add_parser(name, parents=[parents], help=text)
+        oc.add_argument("task", nargs="*", help="Run this task non-interactively instead of opening the TUI")
+        oc.add_argument("--session", dest="oc_session", help="OpenCode session ID to continue")
+        oc.add_argument("--continue", dest="oc_continue", action="store_true", help="Continue the last OpenCode session")
     return parser
 
 
@@ -562,9 +569,63 @@ def handle_resume(target_id: str | None, a: argparse.Namespace, prompt: str | No
     return start_session(a, prompt, resume_id=sid)
 
 
+def cmd_opencode(a: argparse.Namespace) -> int:
+    """OpenCode runs the agent loop and tools on THIS computer; every model call goes through a loopback,
+    per-launch-authenticated bridge to Sarness Engine (see openai_bridge.py)."""
+    workspace = resolve_workspace(a)
+    settings, _ = effective_settings(workspace, overrides(a))
+    permissions = EffectivePermissions.for_launch(
+        workspace, settings["permissions"], bypass=getattr(a, "dangerously_skip_permissions", False))
+    name, conn = open_connection(a, settings)
+    try:
+        engine = conn.connect()
+        engine.health()
+        models = engine.models()
+        status = engine.llm_status()
+        loaded_id = status.get("model_id") if status.get("state") == "ready" else None
+        preferred = settings.get("model") or (f"local:{loaded_id}" if loaded_id else None)
+        if not preferred:
+            raise ConfigError("No model is loaded or selected. Load one with 'sarness cabinet load <id>'.")
+        try:
+            selected = resolve_model(models, preferred)
+        except ModelError as exc:
+            raise ConfigError(str(exc)) from exc
+        if selected.get("local") and f"local:{loaded_id}" != selected["ref"]:
+            raise ConfigError(f"{selected['ref']} is not the loaded model ({loaded_id or 'none'}). The OpenCode runtime never "
+                              "swaps models behind other users; load it first with 'sarness cabinet load "
+                              f"{selected['ref'].split(':', 1)[1]}'.")
+        effort = settings.get("effort") or "medium"
+        mode = permissions.mode
+        print(f"SARNESS  {selected.get('name') or selected['ref']} · {effort} effort · {name} · {mode.upper()}"
+              f" · ctx {status.get('ctx') or '?'} · runtime OpenCode", file=sys.stderr)
+        if mode == "bypass":
+            print("BYPASS: OpenCode auto-approves every tool call (--auto). OS permissions and engine auth still apply.",
+                  file=sys.stderr)
+        args = None
+        extra = (["--session", a.oc_session] if getattr(a, "oc_session", None) else []) + \
+                (["--continue"] if getattr(a, "oc_continue", False) else [])
+        task = " ".join(getattr(a, "task", None) or []).strip() or getattr(a, "prompt_opt", None)
+        if task:
+            args = ["run", "-m", f"sarness/{selected['ref']}", *extra, task]
+        try:
+            return launch_opencode(engine, models, selected["ref"], workspace, mode=mode, effort=effort, live=status,
+                                   args=args, tui_args=extra if not task else None)
+        except (RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError(f"Cannot launch OpenCode: {exc}") from exc
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    a = parser.parse_args(argv)
+    # Python <= 3.12 argparse binds an empty list to a trailing nargs="*" positional when options sit between the
+    # positionals ("resume ID --mode auto 'text'"), then rejects the text. Gather such words into the prompt.
+    a, extra = parser.parse_known_args(argv)
+    if extra:
+        target = {"resume": "prompt", "run": "prompt", "code": "task", "opencode": "task"}.get(a.command or "")
+        if not target or any(x.startswith("-") for x in extra):
+            parser.error("unrecognized arguments: " + " ".join(extra))
+        setattr(a, target, list(getattr(a, target, None) or []) + extra)
     try:
         cmd = a.command
         if cmd == "setup":
@@ -586,6 +647,8 @@ def main(argv: list[str] | None = None) -> None:
             code = cmd_upgrade(a)
         elif cmd == "cabinet":
             code = cmd_cabinet(a)
+        elif cmd in ("opencode", "code"):
+            code = cmd_opencode(a)
         elif cmd == "run":
             code = start_session(a, " ".join(a.prompt).strip() or None)
         elif cmd == "resume":
@@ -593,6 +656,9 @@ def main(argv: list[str] | None = None) -> None:
             code = handle_resume(a.session, a, prompt=prompt)
         elif getattr(a, "resume", None) is not None:
             code = handle_resume(a.resume, a, prompt=a.prompt_opt)
+        elif (load_config().get("settings", {}).get("runtime") == "opencode" and not a.continue_last
+              and not getattr(a, "prompt_opt", None)):
+            code = cmd_opencode(a)
         else:
             resume_id = None
             if a.continue_last:

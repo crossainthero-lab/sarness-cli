@@ -29,7 +29,7 @@ def test_truncated_turn_is_discarded_nothing_executes_then_small_calls_work(tmp_
     sess.run(eng, "make a file", 6)
     assert not (root / "bad.txt").exists() and (root / "ok.txt").read_text() == "yes"
     assert sess.status == "completed" and transcript_is_valid(sess.messages)
-    assert "cut off while writing a tool call" in json.dumps(eng.history[1][-1])   # targeted guidance, names the tool
+    assert "hit the output limit while writing a write_file call" in json.dumps(eng.history[1][-1])   # targeted guidance, names the tool
 
 
 def test_reasoning_that_eats_the_budget_turns_thinking_off_next_turn(tmp_path):
@@ -41,9 +41,9 @@ def test_reasoning_that_eats_the_budget_turns_thinking_off_next_turn(tmp_path):
     assert sess.status == "completed"
 
 
-def test_three_truncations_block_with_actionable_message(tmp_path):
+def test_repeated_truncations_block_with_actionable_message(tmp_path):
     sess, _ = make_session(tmp_path)
-    eng = FakeEngine(*[result([call("write_file", {"path": "a", "content": "x"})], finish="length") for _ in range(3)])
+    eng = FakeEngine(*[result([call("write_file", {"path": "a", "content": "x"})], finish="length") for _ in range(5)])
     with pytest.raises(SessionBlocked, match="output limit"):
         sess.run(eng, "go", 10)
     assert sess.status == "blocked:length"
@@ -301,3 +301,61 @@ def test_ctrl_c_at_an_approval_prompt_aborts_the_task_instead_of_denying(tmp_pat
         sess.run(eng, "go", 3)
     assert not (root / "a").exists() and not (root / "b").exists() and transcript_is_valid(sess.messages)
     assert sess.status == "interrupted"
+
+def test_unlimited_steps_can_reach_completion_after_60_turns(tmp_path):
+    sess, _ = make_session(tmp_path, max_steps=0)
+    turns = [
+        result([call("update_plan", {"items": [{"text": f"step {i}", "status": "doing"}]}, f"step{i}")])
+        for i in range(66)
+    ]
+    engine = FakeEngine(*turns, result(content="all steps finished"))
+    assert sess.run(engine, "complete the long plan") == "all steps finished"
+    assert sess.stats.turns == 67
+    assert sess.status == "completed"
+    assert transcript_is_valid(sess.messages)
+
+
+def test_promise_to_act_is_not_misreported_as_completed_work(tmp_path):
+    sess, _ = make_session(tmp_path)
+    engine = FakeEngine(
+        result(content="Good, the server is running. Let me run the benchmark."),
+        result([call("run_command", {"command": "echo benchmark-ran"})]),
+        result(content="Benchmark command completed."),
+    )
+    assert sess.run(engine, "run a benchmark", 5) == "Benchmark command completed."
+    assert len(engine.history) == 3
+    assert any("described a future action" in m["content"] for m in sess.messages if m["role"] == "user")
+    assert sess.commands and sess.commands[0]["exit"] == 0
+
+
+def test_repeated_unfulfilled_promises_block_without_claiming_completion(tmp_path):
+    sess, _ = make_session(tmp_path)
+    engine = FakeEngine(*[result(content="I'll now run the benchmark.") for _ in range(3)])
+    with pytest.raises(SessionBlocked, match="promised work"):
+        sess.run(engine, "run benchmark", 5)
+    assert sess.status == "blocked:unfulfilled_action"
+
+
+def test_promise_detection_ignores_offers_and_earlier_plans():
+    from sarness_cli.agent import promises_action
+    assert promises_action("Server is up. I'll run the benchmark now.")
+    assert promises_action("Next, I will execute the training smoke test")
+    assert not promises_action("All 12 tests pass.\n\nIf you'd like, I'll update the README too.")
+    assert not promises_action("I'll run the tests first.\n...\nDone: tests pass (exit 0) and the fix is in calc.py.")
+    assert not promises_action("Want me to deploy it? Let me know.")
+
+
+def test_summary_marks_a_reverted_temporary_edit_as_net_unchanged(tmp_path):
+    import subprocess as sp
+    sess, root = make_session(tmp_path)
+    (root / "lib.py").write_text("def f():\n    return 1\n")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"]):
+        sp.run(cmd, cwd=root, check=True)
+    eng = FakeEngine(result([call("edit_file", {"path": "lib.py", "old_string": "return 1", "new_string": "return 2"})]),
+                     result([call("edit_file", {"path": "lib.py", "old_string": "return 2", "new_string": "return 1"})]),
+                     result([call("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                     result([call("run_command", {"command": "echo ok"})]), result(content="done"))
+    sess.run(eng, "mutation check", 8)
+    changed = next(l for l in sess.verification() if l.startswith("changed:"))
+    assert "lib.py (+1 -1, net unchanged vs git)" in changed or "lib.py (+2 -2, net unchanged vs git)" in changed, changed
+    assert "new.py (+1 -0)" in changed

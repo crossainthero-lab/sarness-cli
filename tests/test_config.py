@@ -84,8 +84,8 @@ def test_legacy_010_config_is_migrated_in_memory():
 
 
 def test_setting_validation():
-    assert C.coerce_setting("max_steps", "30") == 30 and C.coerce_setting("show_reasoning", "on") is True
+    assert C.coerce_setting("max_steps", "30") == 30 and C.coerce_setting("max_steps", "unlimited") == 0 and C.coerce_setting("show_reasoning", "on") is True
     assert C.coerce_setting("context_tokens", "none") is None
-    for k, v in [("effort", "extreme"), ("max_steps", "0"), ("max_steps", "x"), ("nonsense", "1"), ("retries", "99")]:
+    for k, v in [("effort", "extreme"), ("max_steps", "-1"), ("max_steps", "x"), ("nonsense", "1"), ("retries", "99")]:
         with pytest.raises(C.ConfigError):
             C.coerce_setting(k, v)

@@ -47,7 +47,7 @@ def parse_sse(lines: Any, on_event: Callable[[dict[str, Any]], None] | None = No
         try:
             ev = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise EngineError(f"Engine sent a malformed stream event: {exc}", "stream") from exc
+            raise EngineError(f"Engine sent a malformed stream event: {exc}", "stream", retryable=True) from exc
         kind = ev.get("type")
         if kind == "error":
             msg = str(ev.get("message"))
@@ -70,6 +70,11 @@ def parse_sse(lines: Any, on_event: Callable[[dict[str, Any]], None] | None = No
                           "stream", retryable=True)
     if not isinstance(done.get("message"), dict):
         raise EngineError("Engine returned an invalid final message", "protocol")
+    if not done.get("finish_reason"):
+        # Engine 0.4 still sends `done` when its model server's stream breaks off, just without a finish reason:
+        # the turn (and any tool call in it) is incomplete.
+        raise EngineError("The model server's stream was cut off before the turn finished; no tools were executed",
+                          "stream", retryable=True)
     return done
 
 
@@ -257,10 +262,15 @@ class Engine:
         return out
 
     def completion(self, model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-                   params: dict[str, Any], on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+                   params: dict[str, Any], on_event: Callable[[dict[str, Any]], None] | None = None,
+                   on_open: Callable[[Any], None] | None = None) -> dict[str, Any]:
+        """`on_open(response)` receives the live stream so another thread can abort it (closing it cancels the
+        generation on the engine)."""
         data = {"model_ref": model, "messages": messages, "tools": tools, "tool_choice": "auto", "params": params}
         try:
             with self.request("POST", "/v1/agent/completions", data, stream=True) as stream:
+                if on_open:
+                    on_open(stream)
                 try:
                     return parse_sse(stream, on_event)
                 except (socket.timeout, TimeoutError) as exc:
@@ -286,7 +296,7 @@ def classify_http(code: int, message: str) -> EngineError:
         return EngineError(f"Engine HTTP 404: {detail}", "http", code)
     if is_context_error(detail):
         return EngineError(f"Engine HTTP {code}: {detail}", "context", code)
-    if code in (429, 502, 503, 504):
+    if code in (429, 500, 502, 503, 504):
         return EngineError(f"Engine HTTP {code}: {detail}", "http", code, retryable=True, subkind="server_unavailable")
     return EngineError(f"Engine HTTP {code}: {detail}", "http", code)
 

@@ -27,6 +27,15 @@ def test_incomplete_stream_raises_and_is_retryable():
     assert ei.value.retryable
 
 
+def test_done_without_finish_reason_is_a_cut_stream_and_its_tool_calls_are_dropped():
+    # Engine 0.4 emits `done` even when llama-server's stream broke off; finish_reason is then null.
+    cut = {"type": "done", "finish_reason": None, "message": {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "write_file", "arguments": "{\"path\": \"a.py\", \"cont"}}]}}
+    with pytest.raises(EngineError, match="cut off") as ei:
+        parse_sse(sse(cut))
+    assert ei.value.kind == "stream" and ei.value.retryable
+
+
 def test_error_event_context_is_classified():
     with pytest.raises(EngineError) as ei:
         parse_sse(sse({"type": "error", "message": "request exceeds the available context size"}))

@@ -243,3 +243,27 @@ def test_resume_restores_bypass_unless_user_explicitly_selects_normal(engine, pr
     assert not (project / "normal.txt").exists()
     assert "approval needed" in capsys.readouterr().err
     assert "Permissions: Bypass" in srv.completions[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["resume", "abc", "--mode", "auto", "--verbose", "finish the task"],
+    ["resume", "abc", "finish the task", "--verbose"],
+])
+def test_resume_prompt_after_options_on_every_python(monkeypatch, argv):
+    # Python <= 3.12 argparse left the text unparsed when options came between the positionals.
+    seen = {}
+
+    def fake_resume(session, a, prompt=None):
+        seen.update(session=session, prompt=prompt)
+        return 0
+
+    monkeypatch.setattr(cli, "handle_resume", fake_resume)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 0 and seen == {"session": "abc", "prompt": "finish the task"}
+
+
+def test_unknown_options_are_still_rejected(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["resume", "abc", "--no-such-flag"])
+    assert exc.value.code == 2

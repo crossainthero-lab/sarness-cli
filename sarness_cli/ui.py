@@ -114,7 +114,7 @@ class Console:
         self._text_started = False
         self.spin.start("waiting for the model")
         if self.verbose:
-            self.err(self.st.dim(f"· turn {step}/{max_steps} · {info}"))
+            self.err(self.st.dim(f"· turn {step}/{max_steps if max_steps else '∞'} · {info}"))
 
     def reasoning(self, chunk: str) -> None:
         self._reasoned += len(chunk)

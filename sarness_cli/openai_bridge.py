@@ -1,0 +1,503 @@
+"""Loopback-only OpenAI Chat Completions adapter: OpenCode -> Sarness Engine.
+
+This is a protocol bridge, NOT an inference engine. Every completion is sent to Sarness Engine's
+`/v1/agent/completions` over the existing authenticated connection (SSH tunnel or HTTPS); the Sarness
+token never reaches OpenCode, which only gets a random per-launch key for 127.0.0.1.
+
+Invariants (each has a regression test in tests/test_openai_bridge.py):
+- Tool calls are emitted only from the engine's final `done` event, i.e. complete; a turn cut by the output
+  limit (`finish_reason: length`) never carries tool calls, so a truncated call cannot be executed.
+- A stream that ends without a finish reason is an error, never a successful `stop`. Before any byte reaches
+  the client it is retried (inference has no side effects); afterwards the client gets an error event.
+- When the client disconnects, the upstream engine request is closed, which cancels the generation.
+- A local model is used only if it is the one already loaded, with its live ctx/gpu_layers pinned, so a request
+  can never silently reload or evict a model.
+- OpenCode runs in the requested workspace: it takes its directory from $PWD, not the process cwd.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import select
+import shutil
+import socket
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+from .engine import EngineError
+
+MAX_BODY = 32 * 1024 * 1024
+STREAM_RETRIES = 2                  # extra attempts while nothing has been sent to the client
+EFFORTS = ("low", "medium", "high")
+VALIDATED_MAJOR = 2                 # OpenCode major version checked live against Sarness Engine
+SAMPLING = ("temperature", "top_p", "top_k", "min_p", "seed", "presence_penalty", "frequency_penalty")
+MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+
+
+def output_limit(ctx: int) -> int:
+    return max(1024, min(32768, ctx // 4))
+
+
+def model_context(model: dict[str, Any], live: dict[str, Any] | None) -> int:
+    """The context the engine will actually serve: the loaded ctx for the loaded local model, else the default."""
+    if live and model.get("local") and f"local:{live.get('model_id')}" == model.get("ref") and live.get("ctx"):
+        return int(live["ctx"])
+    return max(2048, int(model.get("default_ctx") or model.get("context_max") or 32768))
+
+
+def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: str, *,
+                    live: dict[str, Any] | None = None, permission: dict[str, Any] | None = None) -> dict[str, Any]:
+    """OpenCode 2.x configuration (`providers` schema) for the Sarness bridge provider."""
+    catalog: dict[str, Any] = {}
+    for m in models:
+        ref = str(m.get("ref") or "")
+        if not ref or m.get("supported") is False:
+            continue
+        if m.get("local") and not (live and f"local:{live.get('model_id')}" == ref and live.get("state") == "ready"):
+            continue            # only the loaded local model: selecting another would evict it for everyone
+        ctx = model_context(m, live)
+        catalog[ref] = {
+            "modelID": ref,
+            "name": str(m.get("name") or ref),
+            "limit": {"context": ctx, "output": output_limit(ctx)},
+            "capabilities": {
+                "tools": True, "temperature": True,
+                "input": ["text"], "output": ["text"],
+                "reasoning": {"supported": True, "effort": list(EFFORTS)},
+            },
+            "compatibility": {"reasoningField": "reasoning_content", "streamUsage": True,
+                              "maxTokensField": "max_tokens", "requireFinishReason": True},
+            "variants": [{"id": e, "body": {"reasoning_effort": e}} for e in EFFORTS],
+        }
+    if default not in catalog:
+        raise ValueError(f"The selected Sarness model {default!r} is unavailable (a local model must be loaded first)")
+    cfg: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"sarness/{default}",
+        "small_model": f"sarness/{default}",
+        "autoupdate": False,
+        "share": "disabled",
+        "enabled_providers": ["sarness"],
+        "providers": {
+            "sarness": {
+                "name": "Sarness Engine",
+                "package": "@opencode/ai/providers/openai-compatible",
+                "settings": {"baseURL": url, "apiKey": key, "headerTimeout": 900000, "chunkTimeout": 900000},
+                "models": catalog,
+            }
+        },
+    }
+    if permission is not None:
+        cfg["permission"] = permission
+    return cfg
+
+
+# Sarness permission modes expressed as OpenCode rules. OpenCode matches the most specific bash pattern.
+_ASK_COMMANDS = ["sudo *", "su *", "rm -r*", "rm -f*", "git push*", "git reset --hard*", "git clean*",
+                 "pip install*", "pip3 install*", "uv pip install*", "npm install*", "npm i *", "pnpm add*",
+                 "yarn add*", "apt*", "curl *", "wget *", "ssh *", "scp *", "rsync *", "docker *", "dd *",
+                 "mkfs*", "chmod -R*", "chown*", "kill*", "pkill*", "systemctl*"]
+
+
+def opencode_permission(mode: str) -> dict[str, Any]:
+    if mode == "ask":
+        return {"edit": "ask", "bash": "ask", "webfetch": "ask", "external_directory": "ask"}
+    if mode == "auto":
+        return {"edit": "allow", "webfetch": "ask", "external_directory": "ask",
+                "bash": {"*": "allow", **{p: "ask" for p in _ASK_COMMANDS}}}
+    if mode == "full-access":
+        return {"edit": "allow", "webfetch": "allow", "external_directory": "ask",
+                "bash": {"*": "allow", **{p: "ask" for p in ("sudo *", "rm -r*", "rm -f*", "git push*",
+                                                            "git reset --hard*", "git clean*", "dd *", "mkfs*")}}}
+    if mode == "bypass":
+        return {"*": "allow"}
+    raise ValueError(f"unknown permission mode {mode!r}")
+
+
+def opencode_major(version_text: str) -> int:
+    """Fail closed when the installed OpenCode version cannot be identified or was never validated."""
+    match = re.search(r"(?<![0-9])([0-9]+)\.[0-9]+(?:\.[0-9]+)?", version_text)
+    if not match:
+        raise RuntimeError(f"Cannot identify OpenCode version from {version_text!r}")
+    major = int(match.group(1))
+    if major != VALIDATED_MAJOR:
+        raise RuntimeError(f"OpenCode {version_text.strip()} is not supported; the Sarness bridge is validated "
+                           f"against OpenCode {VALIDATED_MAJOR}.x")
+    return major
+
+
+def effort_params(effort: Any, default: str) -> dict[str, Any]:
+    """Sarness Engine 0.4 exposes reasoning only as on/off: low/none disable thinking, others enable it."""
+    effort = effort if effort in (*EFFORTS, "max", "none", "minimal") else default
+    return {"thinking": effort not in ("low", "none", "minimal")}
+
+
+class BridgeServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, engine: Any, models: list[dict[str, Any]], *, effort: str = "medium",
+                 retries: int = STREAM_RETRIES):
+        self.engine = engine
+        self.models = {str(m["ref"]): m for m in models if m.get("ref") and m.get("supported") is not False}
+        self.key = secrets.token_urlsafe(32)
+        self.effort = effort
+        self.retries = retries
+        self.stats = {"requests": 0, "completed": 0, "errors": 0, "cancelled": 0, "retries": 0}
+        super().__init__(("127.0.0.1", 0), _Handler)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}/v1"
+
+    def start(self) -> threading.Thread:
+        worker = threading.Thread(target=self.serve_forever, name="sarness-openai-bridge", daemon=True)
+        worker.start()
+        return worker
+
+
+class ClientGone(Exception):
+    pass
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server: BridgeServer
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass            # no prompts, payloads or keys in logs
+
+    # ------------------------------------------------------------ plumbing
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, status: int, message: str, code: str = "sarness_bridge_error") -> None:
+        self._json(status, {"error": {"message": message, "type": code, "code": code}})
+
+    def _authorized(self) -> bool:
+        return secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.key)
+
+    def _write(self, data: bytes) -> None:
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+        except OSError as exc:
+            raise ClientGone() from exc
+
+    def _event(self, payload: dict[str, Any]) -> None:
+        self._write(b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n")
+
+    def _client_closed(self) -> bool:
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
+    # ------------------------------------------------------------ routes
+    def do_GET(self) -> None:
+        if not self._authorized():
+            return self._error(401, "Unauthorized local Sarness bridge request")
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/models":
+            self._json(200, {"object": "list", "data": [
+                {"id": ref, "object": "model", "owned_by": "sarness-engine"} for ref in self.server.models]})
+        elif path == "/health":
+            self._json(200, {"status": "ok", **self.server.stats})
+        else:
+            self._error(404, "Unknown endpoint")
+
+    def do_POST(self) -> None:
+        if not self._authorized():
+            return self._error(401, "Unauthorized local Sarness bridge request")
+        if self.path.split("?")[0].rstrip("/") != "/v1/chat/completions":
+            return self._error(404, "Unknown endpoint")
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 < size <= MAX_BODY:
+                return self._error(413, "Missing or oversized completion request")
+            data = json.loads(self.rfile.read(size))
+            if not isinstance(data, dict):
+                raise ValueError("body must be a JSON object")
+            model = data.get("model")
+            if model not in self.server.models:
+                return self._error(404, f"Model {model!r} is not served by this Sarness bridge", "model_not_found")
+            messages = data.get("messages")
+            if not isinstance(messages, list) or not messages:
+                raise ValueError("messages must be a non-empty array")
+            tools = data.get("tools") or []
+            if not isinstance(tools, list):
+                raise ValueError("tools must be an array")
+        except (ValueError, UnicodeError) as exc:
+            return self._error(400, f"Invalid completion request: {exc}", "invalid_request_error")
+
+        self.server.stats["requests"] += 1
+        messages = [{k: v for k, v in m.items() if k in MESSAGE_KEYS} for m in messages if isinstance(m, dict)]
+        params: dict[str, Any] = {k: data[k] for k in SAMPLING if data.get(k) is not None}
+        params["max_tokens"] = int(data.get("max_completion_tokens") or data.get("max_tokens") or 4096)
+        params.update(effort_params(data.get("reasoning_effort") or data.get("reasoningEffort"), self.server.effort))
+        if self.server.models[model].get("local"):
+            try:
+                live = self.server.engine.llm_status()
+            except EngineError as exc:
+                return self._error(502, f"Cannot inspect the loaded model: {exc}", "engine_unavailable")
+            if live.get("state") != "ready" or f"local:{live.get('model_id')}" != model:
+                return self._error(409, "The selected model is no longer loaded on the engine; load it again "
+                                        "(sarness cabinet) - the bridge never swaps models implicitly", "model_not_loaded")
+            if live.get("ctx"):
+                params["ctx"] = int(live["ctx"])
+            if live.get("gpu_layers") is not None:
+                params["gpu_layers"] = live["gpu_layers"]
+        if data.get("stream") is True:
+            include_usage = bool((data.get("stream_options") or {}).get("include_usage", True))
+            self._stream(model, messages, tools, params, include_usage)
+        else:
+            self._complete(model, messages, tools, params)
+
+    # ------------------------------------------------------------ completion
+    def _upstream(self, model: str, messages: list, tools: list, params: dict[str, Any], on_event: Any) -> dict[str, Any]:
+        """One engine call, aborted (which cancels the generation) as soon as the client disconnects."""
+        holder: dict[str, Any] = {}
+        stop = threading.Event()
+
+        def watch() -> None:
+            while not stop.wait(0.5):
+                if self._client_closed():
+                    holder["gone"] = True
+                    resp = holder.get("resp")
+                    try:
+                        sock = resp.fp.raw._sock if resp is not None else None   # type: ignore[union-attr]
+                        if sock is not None:
+                            sock.shutdown(socket.SHUT_RDWR)
+                    except (AttributeError, OSError):
+                        pass
+                    return
+
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        try:
+            done = self.server.engine.completion(model, messages, tools, params, on_event,
+                                                 on_open=lambda r: holder.__setitem__("resp", r))
+        except EngineError:
+            if holder.get("gone"):
+                raise ClientGone() from None
+            raise
+        finally:
+            stop.set()
+        if holder.get("gone"):
+            raise ClientGone()
+        return done
+
+    @staticmethod
+    def _finish(done: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str | None]:
+        """(finish_reason, complete tool calls, problem). Never returns calls from a cut-off turn."""
+        message = done.get("message") or {}
+        finish = done.get("finish_reason")
+        calls = []
+        for i, c in enumerate(message.get("tool_calls") or []):
+            fn = c.get("function") or {}
+            args = fn.get("arguments")
+            calls.append({"index": i, "id": c.get("id") or f"call_{secrets.token_hex(6)}", "type": "function",
+                          "function": {"name": fn.get("name") or "",
+                                       "arguments": args if isinstance(args, str) else json.dumps(args or {})}})
+        if finish is None:
+            return "error", [], "the engine stream ended without a finish reason (generation was cut off)"
+        if finish == "length":
+            return "length", [], None          # any call in a truncated turn is incomplete by definition
+        if calls:
+            return "tool_calls", calls, None
+        return ("stop" if finish in ("stop", "tool_calls", "eos") else str(finish)), [], None
+
+    @staticmethod
+    def _usage(done: dict[str, Any]) -> dict[str, Any]:
+        u = dict(done.get("usage") or {})
+        t = done.get("timings") or {}
+        u.setdefault("prompt_tokens", t.get("prompt_n", 0))
+        u.setdefault("completion_tokens", t.get("predicted_n", 0))
+        u.setdefault("total_tokens", (u.get("prompt_tokens") or 0) + (u.get("completion_tokens") or 0))
+        return u
+
+    @staticmethod
+    def _engine_error(exc: EngineError) -> tuple[int, str, str]:
+        if exc.kind == "context":
+            return 400, f"This model's maximum context length was exceeded: {exc}", "context_length_exceeded"
+        if exc.kind == "busy":
+            return 409, str(exc), "engine_busy"
+        if exc.kind == "auth":
+            return 502, str(exc), "engine_auth"
+        return 502, f"Sarness Engine failure: {exc}", "engine_error"
+
+    def _complete(self, model: str, messages: list, tools: list, params: dict[str, Any]) -> None:
+        attempt = 0
+        while True:
+            try:
+                done = self._upstream(model, messages, tools, params, None)
+                finish, calls, problem = self._finish(done)
+                if problem:
+                    raise EngineError(problem, "stream", retryable=True)
+                break
+            except ClientGone:
+                self.server.stats["cancelled"] += 1
+                return
+            except EngineError as exc:
+                if exc.retryable and attempt < self.server.retries:
+                    attempt += 1
+                    self.server.stats["retries"] += 1
+                    time.sleep(min(8.0, 1.5 * 2 ** (attempt - 1)))
+                    continue
+                self.server.stats["errors"] += 1
+                return self._error(*self._engine_error(exc))
+        message: dict[str, Any] = {"role": "assistant", "content": done["message"].get("content") or ""}
+        if done.get("reasoning"):
+            message["reasoning_content"] = done["reasoning"]
+        if calls:
+            message["tool_calls"] = [{k: v for k, v in c.items() if k != "index"} for c in calls]
+        self.server.stats["completed"] += 1
+        self._json(200, {"id": "chatcmpl-" + secrets.token_hex(12), "object": "chat.completion",
+                         "created": int(time.time()), "model": model,
+                         "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                         "usage": self._usage(done)})
+
+    def _stream(self, model: str, messages: list, tools: list, params: dict[str, Any], include_usage: bool) -> None:
+        ident = "chatcmpl-" + secrets.token_hex(12)
+        created = int(time.time())
+        state = {"headers": False, "sent": False}
+
+        def chunk(delta: dict[str, Any], finish: str | None = None) -> None:
+            self._event({"id": ident, "object": "chat.completion.chunk", "created": created, "model": model,
+                         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+
+        def open_stream() -> None:
+            # Headers are sent lazily so failures before the first token keep a real HTTP status.
+            if not state["headers"]:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                state["headers"] = True
+                chunk({"role": "assistant", "content": ""})
+
+        def on_event(ev: dict[str, Any]) -> None:
+            kind = ev.get("type")
+            if kind == "delta":
+                if ev.get("reasoning"):
+                    open_stream()
+                    chunk({"reasoning_content": ev["reasoning"]})
+                    state["sent"] = True
+                if ev.get("content"):
+                    open_stream()
+                    chunk({"content": ev["content"]})
+                    state["sent"] = True
+            elif kind == "tool_call" and state["headers"]:
+                self._write(b": tool-call in progress\n\n")     # keeps the client alive and detects disconnects
+
+        attempt = 0
+        while True:
+            try:
+                done = self._upstream(model, messages, tools, params, on_event)
+                finish, calls, problem = self._finish(done)
+                if problem:
+                    raise EngineError(problem, "stream", retryable=True)
+                break
+            except ClientGone:
+                self.server.stats["cancelled"] += 1
+                self.close_connection = True
+                return
+            except EngineError as exc:
+                if exc.retryable and not state["sent"] and attempt < self.server.retries:
+                    attempt += 1
+                    self.server.stats["retries"] += 1
+                    time.sleep(min(8.0, 1.5 * 2 ** (attempt - 1)))
+                    continue
+                self.server.stats["errors"] += 1
+                status, message, code = self._engine_error(exc)
+                if not state["headers"]:
+                    return self._error(status, message, code)
+                try:   # mid-stream: an explicit error, never a finish_reason that looks like success
+                    self._event({"error": {"message": message, "type": code, "code": code}})
+                except ClientGone:
+                    pass
+                self.close_connection = True
+                return
+        try:
+            open_stream()
+            if not state["sent"] and done["message"].get("content"):
+                chunk({"content": done["message"]["content"]})
+            if calls:
+                chunk({"tool_calls": calls})
+            chunk({}, finish)
+            if include_usage:
+                self._event({"id": ident, "object": "chat.completion.chunk", "created": created, "model": model,
+                             "choices": [], "usage": self._usage(done)})
+            self._write(b"data: [DONE]\n\n")
+            self.server.stats["completed"] += 1
+        except ClientGone:
+            self.server.stats["cancelled"] += 1
+        self.close_connection = True
+
+
+def opencode_binary() -> str:
+    found = shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode")
+    if not os.access(found, os.X_OK):
+        raise RuntimeError("OpenCode is not installed (https://opencode.ai/install), or put it on PATH.")
+    return found
+
+
+def opencode_env(cfg: dict[str, Any], workspace: Path, config_dir: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(cfg)
+    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
+    # OpenCode resolves its project directory from $PWD, not from the process cwd: without this, its tools act
+    # on whatever directory the parent shell was in.
+    env["PWD"] = str(workspace)
+    if config_dir is not None:
+        env["OPENCODE_CONFIG_DIR"] = str(config_dir)
+    return env
+
+
+def opencode_command(binary: str, workspace: Path, mode: str, args: list[str] | None,
+                     tui_args: list[str] | None = None) -> list[str]:
+    """--standalone: a private server inherits this per-launch endpoint and key (the shared background service
+    would not). --auto only in Sarness bypass mode. The TUI takes no --model flag; the model comes from config."""
+    sub = list(args or [])
+    cmd = [binary, *sub[:1], "--standalone", *sub[1:]] if sub else [binary, "--standalone", *(tui_args or [])]
+    if mode == "bypass":
+        cmd.append("--auto")
+    if not sub:
+        cmd.append(str(workspace))
+    return cmd
+
+
+def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, workspace: Path, *,
+                    mode: str = "auto", effort: str = "medium", live: dict[str, Any] | None = None,
+                    args: list[str] | None = None, tui_args: list[str] | None = None,
+                    config_dir: Path | None = None) -> int:
+    """Run OpenCode against a temporary, authenticated, loopback-only bridge. `args` go to OpenCode
+    (e.g. ["run", "--format", "json", "task"]); the default is the interactive TUI in `workspace`."""
+    binary = opencode_binary()
+    version = subprocess.check_output([binary, "--version"], text=True, timeout=20).strip()
+    opencode_major(version)
+    workspace = workspace.resolve()
+    bridge = BridgeServer(engine, models, effort=effort)
+    bridge.start()
+    try:
+        cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode))
+        return subprocess.call(opencode_command(binary, workspace, mode, args, tui_args), cwd=workspace,
+                               env=opencode_env(cfg, workspace, config_dir))
+    finally:
+        bridge.shutdown()
+        bridge.server_close()

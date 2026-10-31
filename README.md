@@ -75,7 +75,7 @@ sarness sessions | server | upgrade | --version
 ```
 
 Interactive slash commands: `/help /cabinet /model /effort /thinking /permissions /status /plan /diff /compact /clear /resume /rename /exit`.
-**Enter** sends, **Alt+Enter** (or Esc,Enter, or a trailing `\`) inserts a newline, **Ctrl-C** cancels the running task (state is saved),
+**Enter** sends, **Alt+Enter** (or Esc,Enter, or a trailing ``) inserts a newline, **Ctrl-C** cancels the running task (state is saved),
 **Ctrl-D** quits. Large pasted prompts are automatically collapsed into compact `▸ Pasted text` indicators (expand/edit with **Ctrl-E**).
 The live bottom status bar shows: `Model · Effort · Server ● · RAM Used/Total · Permission Mode`.
 
@@ -209,3 +209,29 @@ and end-to-end `sarness run` flows. Permission propagation and installed/live ve
 * Tool calling for local models is *unverified* unless probed; small models (≤ 8B) write weak tests and can rewrite files wholesale — review the diffs.
 * Commands are not OS-sandboxed. Linux/Ubuntu only (macOS likely works; Windows untested).
 * One agent task at a time; no background process tool (`start_process`) and no MCP.
+
+## OpenCode runtime (`sarness code`)
+
+Sarness can run its agent loop on [OpenCode](https://opencode.ai) 2.x while every model call still goes to
+Sarness Engine. OpenCode runs on *this* computer (tools act on your workspace); a loopback-only bridge with a fresh
+per-launch key translates OpenAI Chat Completions to the engine's `/v1/agent/completions` over the existing SSH
+tunnel or TLS connection. The Sarness token never reaches OpenCode.
+
+```bash
+sarness code                          # OpenCode TUI in the current folder, inference on the default server
+sarness code "fix the failing test"   # one non-interactive task
+sarness code --continue               # continue the last OpenCode session
+sarness config set runtime opencode   # make plain `sarness` open this runtime (set back to native to revert)
+```
+
+* Only the model that is already loaded is offered, with its live ctx/gpu_layers pinned: the bridge never reloads
+  or swaps a model behind other users. Load one first with `sarness cabinet load <id>`.
+* Effort maps to OpenCode variants (`low` / `medium` / `high`, pick with OpenCode's variant switcher); Engine 0.4
+  only exposes thinking on/off, so `low` = no thinking, `medium`/`high` = thinking.
+* Permission modes map to OpenCode rules: `ask` asks for edits and commands; `auto` allows edits and ordinary
+  commands but asks for installs, network, `rm -r`, `git push`, `sudo` and similar; `full-access` asks only for
+  destructive commands; `--dangerously-skip-permissions` = allow everything (`--auto`).
+* Sessions, compaction, undo/snapshots and the TUI are OpenCode's (stored in `~/.local/share/opencode`); native
+  Sarness sessions are untouched and still resume with `sarness resume`.
+
+See [docs/OPENCODE.md](docs/OPENCODE.md) for the runtime evaluation, protocol guarantees and live test results.
