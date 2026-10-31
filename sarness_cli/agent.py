@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -387,11 +388,24 @@ class Session:
         except OSError:
             return None
 
+    def _net_unchanged(self, path: str) -> bool:
+        """True for a git-tracked file whose content equals HEAD again (e.g. a temporary edit that was reverted)."""
+        try:
+            root = str(self.ws.root)
+            tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "--", path], cwd=root,
+                                     capture_output=True, timeout=10).returncode == 0
+            return tracked and subprocess.run(["git", "diff", "--quiet", "HEAD", "--", path], cwd=root,
+                                              capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def verification(self) -> list[str]:
         """Independent account of what changed and whether it was verified, from real tool results only."""
         lines = []
         if self.files:
-            lines.append("changed: " + ", ".join(f"{p} (+{v.get('added', 0)} -{v.get('removed', 0)})" for p, v in self.files.items()))
+            lines.append("changed: " + ", ".join(
+                f"{p} (+{v.get('added', 0)} -{v.get('removed', 0)}" + (", net unchanged vs git" if self._net_unchanged(p) else "") + ")"
+                for p, v in self.files.items()))
         else:
             lines.append("no files changed")
         last = self.commands[-1] if self.commands else None

@@ -20,6 +20,10 @@ with the defects found in review and live testing fixed.
 - The unfulfilled-action nudge only looks at the closing sentences and ignores offers.
 
 ### Fixed
+- `sarness resume ID --mode auto "text"` failed on Python <= 3.12 (argparse); the prompt is now collected on every
+  Python version.
+- The run summary marks files whose net diff against git is empty (e.g. a reverted temporary edit) as
+  `net unchanged vs git` instead of listing them as changed.
 - A `done` event without `finish_reason` (Engine 0.4 sends this when llama-server's stream breaks off) was accepted
   as a finished turn; it is now a retryable stream error and its tool calls are never run.
 - PR #3 launcher: passed `--model` to the OpenCode TUI (unsupported), guessed the v2 variant schema, advertised the

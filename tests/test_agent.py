@@ -343,3 +343,19 @@ def test_promise_detection_ignores_offers_and_earlier_plans():
     assert not promises_action("All 12 tests pass.\n\nIf you'd like, I'll update the README too.")
     assert not promises_action("I'll run the tests first.\n...\nDone: tests pass (exit 0) and the fix is in calc.py.")
     assert not promises_action("Want me to deploy it? Let me know.")
+
+
+def test_summary_marks_a_reverted_temporary_edit_as_net_unchanged(tmp_path):
+    import subprocess as sp
+    sess, root = make_session(tmp_path)
+    (root / "lib.py").write_text("def f():\n    return 1\n")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"]):
+        sp.run(cmd, cwd=root, check=True)
+    eng = FakeEngine(result([call("edit_file", {"path": "lib.py", "old_string": "return 1", "new_string": "return 2"})]),
+                     result([call("edit_file", {"path": "lib.py", "old_string": "return 2", "new_string": "return 1"})]),
+                     result([call("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                     result([call("run_command", {"command": "echo ok"})]), result(content="done"))
+    sess.run(eng, "mutation check", 8)
+    changed = next(l for l in sess.verification() if l.startswith("changed:"))
+    assert "lib.py (+1 -1, net unchanged vs git)" in changed or "lib.py (+2 -2, net unchanged vs git)" in changed, changed
+    assert "new.py (+1 -0)" in changed
