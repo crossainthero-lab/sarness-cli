@@ -72,6 +72,7 @@ def test_build_recipe_is_pinned_and_packaged():
     assert patches, "the Sarness patch series is missing"
     script = (tui.BUILD_DIR / "build.sh").read_text()
     assert "sha256sum -c" in script and "--frozen-lockfile" in script and "OPENCODE_COMMIT" in script
+    assert '!= "$(basename "$dest")"' in script        # a same-build reinstall keeps the rollback target
     import tomllib
     data = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
     shipped = data["tool"]["setuptools"]["package-data"]["sarness_cli"]
