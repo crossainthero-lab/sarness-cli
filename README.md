@@ -224,8 +224,12 @@ sarness code --continue               # continue the last OpenCode session
 sarness config set runtime opencode   # make plain `sarness` open this runtime (set back to native to revert)
 ```
 
-* Only the model that is already loaded is offered, with its live ctx/gpu_layers pinned: the bridge never reloads
-  or swaps a model behind other users. Load one first with `sarness cabinet load <id>`.
+* Startup: if your default model is loaded it starts at once; if nothing is loaded it loads the default (only if
+  it fits in the engine host's free memory with headroom) and waits for it; if a *different* model is loaded it
+  asks whether to use that one or switch (scripted runs fail with the exact flag instead: `--model <loaded>` or
+  `--allow-model-swap`). With no default yet, it opens the model selector and saves your choice.
+* Only the loaded model is offered to OpenCode, with its live ctx/gpu_layers pinned: the bridge never reloads or
+  swaps a model behind other users.
 * Effort maps to OpenCode variants (`low` / `medium` / `high`, pick with OpenCode's variant switcher); Engine 0.4
   only exposes thinking on/off, so `low` = no thinking, `medium`/`high` = thinking.
 * Permission modes map to OpenCode rules: `ask` asks for edits and commands; `auto` allows edits and ordinary

@@ -16,10 +16,11 @@ from .config import (ConfigError, DEFAULTS, EFFORTS, THINKING, coerce_setting, c
                      get_secret, delete_secret)
 from .connection import Connection, LiveEngine, find_profile, get_profile
 from .engine import EngineError, explain_engine_error
-from .menu import select_model
+from .menu import MenuItem, TerminalMenu, select_model
 from .modelinfo import cache_models, load_cached_models, record_probe
 from .openai_bridge import launch_opencode
 from .repl import Repl
+from .startup import StartupUI, ensure_ready
 from .runtime import ModelError, Prepared, build_run_config, describe_model, prepare_model, resolve_model
 from .setup import doctor, run_setup
 from .tools import Workspace
@@ -569,6 +570,43 @@ def handle_resume(target_id: str | None, a: argparse.Namespace, prompt: str | No
     return start_session(a, prompt, resume_id=sid)
 
 
+def startup_ui(server: str) -> StartupUI:
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+
+    def info(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    def choose(title: str, subtitle: str, options: list[tuple[str, str, str]]) -> str | None:
+        if sys.stdout.isatty():
+            try:
+                picked = TerminalMenu(title, [MenuItem(k, label, desc) for k, label, desc in options],
+                                      subtitle=subtitle, show_filter=False).run()
+                return picked.key if picked else None
+            except Exception:  # noqa: BLE001 - fall back to a numbered prompt
+                pass
+        info(f"{title}\n{subtitle}")
+        for i, (_, label, desc) in enumerate(options, 1):
+            info(f"  {i}. {label}  ({desc})")
+        try:
+            pick = input("Choose (number): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return options[int(pick) - 1][0] if pick.isdigit() and 1 <= int(pick) <= len(options) else None
+
+    def pick(models: list[dict[str, Any]], current: str | None) -> dict[str, Any] | None:
+        if sys.stdout.isatty():
+            try:
+                return select_model(models, current, server)
+            except Exception:  # noqa: BLE001
+                pass
+        options = [(m["ref"], m.get("name") or m["ref"], describe_model(m, server, (current or ":").split(":", 1)[1]))
+                   for m in models]
+        key = choose("Select model", f"Server: {server}", options)
+        return next((m for m in models if m["ref"] == key), None)
+
+    return StartupUI(interactive, info, choose, pick)
+
+
 def cmd_opencode(a: argparse.Namespace) -> int:
     """OpenCode runs the agent loop and tools on THIS computer; every model call goes through a loopback,
     per-launch-authenticated bridge to Sarness Engine (see openai_bridge.py)."""
@@ -581,19 +619,17 @@ def cmd_opencode(a: argparse.Namespace) -> int:
         engine = conn.connect()
         engine.health()
         models = engine.models()
-        status = engine.llm_status()
-        loaded_id = status.get("model_id") if status.get("state") == "ready" else None
-        preferred = settings.get("model") or (f"local:{loaded_id}" if loaded_id else None)
-        if not preferred:
-            raise ConfigError("No model is loaded or selected. Load one with 'sarness cabinet load <id>'.")
         try:
-            selected = resolve_model(models, preferred)
+            ready = ensure_ready(engine, models, settings.get("model"), startup_ui(name),
+                                 allow_swap=getattr(a, "allow_model_swap", False),
+                                 allow_low_memory=getattr(a, "allow_low_memory", False),
+                                 wanted_ctx=settings.get("context_tokens"))
         except ModelError as exc:
             raise ConfigError(str(exc)) from exc
-        if selected.get("local") and f"local:{loaded_id}" != selected["ref"]:
-            raise ConfigError(f"{selected['ref']} is not the loaded model ({loaded_id or 'none'}). The OpenCode runtime never "
-                              "swaps models behind other users; load it first with 'sarness cabinet load "
-                              f"{selected['ref'].split(':', 1)[1]}'.")
+        selected, status = ready.model, ready.status
+        if ready.save_default:
+            where = update_settings({"model": selected["ref"]}, workspace=workspace, scope="server", server=name)
+            print(f"✓ default model for {where}: {selected['ref']}", file=sys.stderr)
         effort = settings.get("effort") or "medium"
         mode = permissions.mode
         print(f"SARNESS  {selected.get('name') or selected['ref']} · {effort} effort · {name} · {mode.upper()}"

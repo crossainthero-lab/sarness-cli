@@ -1,6 +1,6 @@
 # OpenCode runtime: evaluation, design and live results
 
-Status: supported runtime since 0.3.0 (`sarness code`, or `runtime = opencode`). The native runtime stays the
+Status: supported runtime since 0.3.0 (startup auto-load since 0.3.1) (`sarness code`, or `runtime = opencode`). The native runtime stays the
 default; see "Why native is still the default" below.
 
 ## Execution flow
@@ -57,6 +57,9 @@ Verified against the installed binary, not assumed:
 * A client disconnect closes the upstream request, which cancels generation on the engine.
 * Only the loaded local model is offered and every request pins its ctx/gpu_layers; if someone swaps the model,
   requests fail with 409 instead of reloading.
+* Startup (0.3.1, `sarness_cli/startup.py`, tests in `tests/test_startup.py`) loads the configured model when
+  nothing is loaded and it fits, and never unloads a different loaded model without an explicit choice
+  (interactive menu or `--allow-model-swap`). The bridge starts with the post-load live status.
 
 ## Live results (2026-10-31, Engine 0.4.0 on the Spark, Qwen3.6 35B-A3B MXFP4_MOE, ctx 131072)
 
