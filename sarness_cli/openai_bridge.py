@@ -35,6 +35,7 @@ from typing import Any
 
 from . import __version__, tui
 from .engine import EngineError
+from .guard import Guard, Ledger
 
 try:                                # POSIX terminals only; elsewhere the launcher simply skips terminal restoration
     import termios
@@ -47,6 +48,7 @@ EFFORTS = ("low", "medium", "high")
 VALIDATED_MAJOR = 2                 # OpenCode major version checked live against Sarness Engine
 SAMPLING = ("temperature", "top_p", "top_k", "min_p", "seed", "presence_penalty", "frequency_penalty")
 MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+MAX_HIDDEN_CALLS = 4                # guard follow-up model calls for one client request (the guard's own bounds are tighter)
 
 
 def output_limit(ctx: int) -> int:
@@ -163,15 +165,32 @@ class BridgeServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, engine: Any, models: list[dict[str, Any]], *, effort: str = "medium",
-                 retries: int = STREAM_RETRIES, live: dict[str, Any] | None = None):
+                 retries: int = STREAM_RETRIES, live: dict[str, Any] | None = None, mode: str = "auto",
+                 workspace: Path | str | None = None, guard: bool | None = None):
         self.engine = engine
+        self.mode = mode
+        self.workspace = str(workspace) if workspace else None
+        self.guard_enabled = (os.environ.get("SARNESS_GUARD", "on").lower() not in ("off", "0", "no")) if guard is None else guard
+        self._guards: dict[str, Guard] = {}
+        self._guard_lock = threading.Lock()
+        self._session_locks: dict[str, threading.Lock] = {}
+        self.guard_events: list[dict[str, Any]] = []
         self.models = {str(m["ref"]): m for m in models if m.get("ref") and m.get("supported") is not False}
         self.expected_live_context = int(live.get("ctx") or 0) if live else None
         self.key = secrets.token_urlsafe(32)
         self.effort = effort
         self.retries = retries
-        self.stats = {"requests": 0, "completed": 0, "errors": 0, "cancelled": 0, "retries": 0}
+        self.stats = {"requests": 0, "completed": 0, "errors": 0, "cancelled": 0, "retries": 0, "guard_interventions": 0}
         super().__init__(("127.0.0.1", 0), _Handler)
+
+    def guard_for(self, session: str) -> tuple[Guard, threading.Lock]:
+        """One guard (and its ledger) per terminal session; the session id is stable across compaction and resume."""
+        with self._guard_lock:
+            guard = self._guards.get(session)
+            if guard is None:
+                guard = Guard(Ledger.open(session, runtime="tui"), mode=self.mode, runtime="tui", workspace=self.workspace)
+                self._guards[session] = guard
+            return guard, self._session_locks.setdefault(session, threading.Lock())
 
     @property
     def url(self) -> str:
@@ -266,6 +285,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         self.server.stats["requests"] += 1
         messages = [{k: v for k, v in m.items() if k in MESSAGE_KEYS} for m in messages if isinstance(m, dict)]
+        guard, messages = self._guard_prepare(messages)
         params: dict[str, Any] = {k: data[k] for k in SAMPLING if data.get(k) is not None}
         params["max_tokens"] = int(data.get("max_completion_tokens") or data.get("max_tokens") or 4096)
         params.update(effort_params(data.get("reasoning_effort") or data.get("reasoningEffort"), self.server.effort))
@@ -285,9 +305,95 @@ class _Handler(BaseHTTPRequestHandler):
                 params["gpu_layers"] = live["gpu_layers"]
         if data.get("stream") is True:
             include_usage = bool((data.get("stream_options") or {}).get("include_usage", True))
-            self._stream(model, messages, tools, params, include_usage)
+            self._stream(model, messages, tools, params, include_usage, guard)
         else:
-            self._complete(model, messages, tools, params)
+            self._complete(model, messages, tools, params, guard)
+
+    # ------------------------------------------------------------ the agent guard
+    def _guard_prepare(self, messages: list[dict[str, Any]]) -> tuple[Guard | None, list[dict[str, Any]]]:
+        """Feed the session's ledger from this request and, after a compaction, append the verified task state so the
+        model keeps its objective, findings and next action. Title and summary requests are left alone."""
+        if not self.server.guard_enabled or Guard.utility_kind(messages):
+            return None, messages
+        session = (self.headers.get("x-opencode-session-id") or self.headers.get("x-opencode-session")
+                   or self.headers.get("x-session-id") or "")
+        if not session:
+            return None, messages
+        guard, lock = self.server.guard_for(session)
+        parent = self.headers.get("x-session-affinity")
+        with lock:
+            if parent and parent != session:
+                guard.led.d["parent"] = parent
+            guard.observe(messages)
+            note = guard.note(messages, budget=3200)
+        if note:
+            messages = messages + [{"role": "user", "content": note}]
+            guard.led.save()
+        return guard, messages
+
+    def _guard_turns(self, guard: Guard, model: str, messages: list, tools: list, params: dict[str, Any], done: dict[str, Any],
+                     finish: str, calls: list[dict[str, Any]], on_event: Any, emit: Any) -> tuple[dict[str, Any], str, list]:
+        """Review the finished turn. A model that asks permission it already has, announces work it did not do, declares
+        victory early or proposes an established repeat is continued with a hidden follow-up call; its first words stay
+        in the transcript (they were already streamed). Returns the final (done, finish, calls)."""
+        if finish in ("length", "error"):
+            return done, finish, calls
+        session = guard.led.key
+        lock = self.server._session_locks.setdefault(session, threading.Lock())
+        text = str((done.get("message") or {}).get("content") or "")
+        chain: list[dict[str, Any]] = []
+        total_text = text
+        for attempt in range(MAX_HIDDEN_CALLS + 1):
+            with lock:
+                before = len(guard.events)
+                verdict = guard.review(text=text, calls=calls, messages=messages + chain)
+                for ev in guard.events[before:]:
+                    self.server.guard_events.append({"session": session, **ev})
+                    self.server.stats["guard_interventions"] += 1
+            if verdict.action == "pass":
+                break
+            if verdict.action == "rewrite":
+                calls = [{**c, "index": i} for i, c in enumerate(verdict.calls or [])]
+                if not calls:
+                    finish = "stop"
+                else:
+                    finish = "tool_calls"
+                break
+            if verdict.action == "give_up":
+                notice = "\n\n[sarness] " + verdict.note
+                emit(notice)
+                total_text += notice
+                calls, finish = [], "stop"
+                break
+            if attempt >= MAX_HIDDEN_CALLS:
+                break
+            chain = chain + ([{"role": "assistant", "content": text}] if text.strip() else []) + \
+                [{"role": "user", "content": verdict.note}]
+            produced = {"n": 0}
+
+            def hidden_event(ev: dict[str, Any]) -> None:
+                if ev.get("type") == "delta" and ev.get("content"):
+                    if not produced["n"] and total_text.strip():
+                        emit("\n\n")
+                    produced["n"] += len(ev["content"])
+                if on_event is not None:
+                    on_event(ev)
+            try:
+                nxt = self._upstream(model, messages + chain, tools, params, hidden_event)
+                nfinish, ncalls, problem = self._finish(nxt)
+                if problem:
+                    raise EngineError(problem, "stream", retryable=True)
+            except EngineError:
+                break                                # a failed follow-up must not fail the user's turn: keep what we have
+            done, finish, calls = nxt, nfinish, ncalls
+            text = str((nxt.get("message") or {}).get("content") or "")
+            if text and not produced["n"]:
+                emit(("\n\n" if total_text.strip() else "") + text)
+            total_text += ("\n\n" if total_text.strip() and text else "") + text
+            if finish in ("length", "error"):
+                break
+        done = {**done, "message": {**(done.get("message") or {}), "content": total_text}}
+        return done, finish, calls
 
     # ------------------------------------------------------------ completion
     def _upstream(self, model: str, messages: list, tools: list, params: dict[str, Any], on_event: Any) -> dict[str, Any]:
@@ -362,7 +468,7 @@ class _Handler(BaseHTTPRequestHandler):
             return 502, str(exc), "engine_auth"
         return 502, f"Sarness Engine failure: {exc}", "engine_error"
 
-    def _complete(self, model: str, messages: list, tools: list, params: dict[str, Any]) -> None:
+    def _complete(self, model: str, messages: list, tools: list, params: dict[str, Any], guard: Guard | None = None) -> None:
         attempt = 0
         while True:
             try:
@@ -382,6 +488,13 @@ class _Handler(BaseHTTPRequestHandler):
                     continue
                 self.server.stats["errors"] += 1
                 return self._error(*self._engine_error(exc))
+        if guard is not None:
+            try:
+                done, finish, calls = self._guard_turns(guard, model, messages, tools, params, done, finish, calls, None,
+                                                        lambda _t: None)
+            except ClientGone:
+                self.server.stats["cancelled"] += 1
+                return
         message: dict[str, Any] = {"role": "assistant", "content": done["message"].get("content") or ""}
         if done.get("reasoning"):
             message["reasoning_content"] = done["reasoning"]
@@ -393,7 +506,8 @@ class _Handler(BaseHTTPRequestHandler):
                          "choices": [{"index": 0, "message": message, "finish_reason": finish}],
                          "usage": self._usage(done)})
 
-    def _stream(self, model: str, messages: list, tools: list, params: dict[str, Any], include_usage: bool) -> None:
+    def _stream(self, model: str, messages: list, tools: list, params: dict[str, Any], include_usage: bool,
+                guard: Guard | None = None) -> None:
         ident = "chatcmpl-" + secrets.token_hex(12)
         created = int(time.time())
         state = {"headers": False, "sent": False}
@@ -456,6 +570,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
         try:
+            if guard is not None:
+                def emit(text: str) -> None:
+                    open_stream()
+                    chunk({"content": text})
+                    state["sent"] = True
+                done, finish, calls = self._guard_turns(guard, model, messages, tools, params, done, finish, calls, on_event, emit)
             open_stream()
             if not state["sent"] and done["message"].get("content"):
                 chunk({"content": done["message"]["content"]})
@@ -590,7 +710,7 @@ def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, wo
     version = subprocess.check_output([binary, "--version"], text=True, timeout=20).strip()
     opencode_major(version)
     workspace = workspace.resolve()
-    bridge = BridgeServer(engine, models, effort=effort, live=live)
+    bridge = BridgeServer(engine, models, effort=effort, live=live, mode=mode, workspace=workspace)
     bridge.start()
     try:
         cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode),

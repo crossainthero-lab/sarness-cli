@@ -324,14 +324,16 @@ def test_promise_to_act_is_not_misreported_as_completed_work(tmp_path):
     )
     assert sess.run(engine, "run a benchmark", 5) == "Benchmark command completed."
     assert len(engine.history) == 3
-    assert any("described a future action" in m["content"] for m in sess.messages if m["role"] == "user")
+    assert any("not an action" in m["content"] for m in sess.messages if m["role"] == "user")
+    assert any(m["role"] == "assistant" and "Let me run the benchmark" in (m.get("content") or "") for m in sess.messages), \
+        "the model's own words stay in the transcript next to the nudge"
     assert sess.commands and sess.commands[0]["exit"] == 0
 
 
 def test_repeated_unfulfilled_promises_block_without_claiming_completion(tmp_path):
     sess, _ = make_session(tmp_path)
-    engine = FakeEngine(*[result(content="I'll now run the benchmark.") for _ in range(3)])
-    with pytest.raises(SessionBlocked, match="promised work"):
+    engine = FakeEngine(*[result(content="I'll now run the benchmark.") for _ in range(4)])
+    with pytest.raises(SessionBlocked, match="announcing work"):
         sess.run(engine, "run benchmark", 5)
     assert sess.status == "blocked:unfulfilled_action"
 

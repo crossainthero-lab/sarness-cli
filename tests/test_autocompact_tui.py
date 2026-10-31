@@ -77,6 +77,8 @@ def test_installed_runtime_switches_real_compaction(tmp_path):
     from ctrl_c_support import Dispatch, is_title_request
     from fake_engine_server import done
 
+    if "SARNESS_TEST_EXECUTABLE" not in os.environ or not Path(os.environ["SARNESS_TEST_EXECUTABLE"]).exists():
+        pytest.skip("needs SARNESS_TEST_EXECUTABLE pointing at an installed Sarness CLI")
     binary = Path(os.environ["SARNESS_TEST_EXECUTABLE"])
     server = engine_for("shell", unique_marker("AUTOCOMPACT-RUNTIME"))
     server.llm["ctx"] = 4096

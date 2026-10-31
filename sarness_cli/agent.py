@@ -24,6 +24,7 @@ from typing import Any
 from .config import atomic_json, load_json, sessions_root
 from .context import compact_in_place, repaired_history, request_chars
 from .engine import EngineError
+from .guard import Guard, Ledger
 from .modelinfo import EFFORT, MIN_PROMPT_FRACTION, Capabilities, plan_turn
 from .policy import PolicyDenied, looks_like_test
 from .tools import MUTATING, TOOL_NAMES, TOOLS, ToolArgError, Workspace, clipped, validate_args
@@ -34,6 +35,8 @@ LENGTH_BOOST = (1.5, 2.0, 2.0, 2.0, 2.0)   # output-budget multiplier on retry n
 DEFAULT_CHUNK = 8000
 MAX_MALFORMED = 4
 SESSION_RE = re.compile(r"[0-9a-f]{20}")
+GUARD_STATUS = {"announced": "blocked:unfulfilled_action", "confirmation": "blocked:confirmation_loop",
+                "premature-complete": "blocked:incomplete", "loop": "blocked:loop", "compaction-loop": "blocked:loop"}
 # Do not accept a promise of future tool work as a completed agent run.
 PENDING_ACTION = re.compile(
     r"(?i)\b(?:let me|i(?:'ll| will)|i(?:'m| am) going to|next[, ]+i(?:'ll| will))\s+"
@@ -248,6 +251,8 @@ class Session:
         self.chunk_limit = DEFAULT_CHUNK     # learned: shrinks after output-limit hits, persisted with the session
         self.recoveries: dict[str, int] = {}
         self.swap_confirm: Any = None   # callable(message) -> bool, set by the CLI
+        self.guard = Guard(Ledger.open("native-" + self.id, runtime="native"), mode=self.ws.mode, runtime="native",
+                           workspace=str(self.ws.root))
         self.ws.log_dir = self.dir / "cmd-logs"
 
     # ------------------------------------------------------------------ paths / persistence
@@ -443,7 +448,7 @@ class Session:
             raise ValueError("max_steps must be nonnegative (0 = unlimited)")
         # consecutive-failure counters, each reset by a clean turn
         net_fail = length_fail = malformed = no_call = text_call = ctx_fail = 0
-        verify_nudges = review_nudges = fail_nudges = pending_nudges = 0
+        verify_nudges = review_nudges = fail_nudges = 0
         recent_sigs: list[str] = []
         recent_errors: list[str] = []
         recent_results: dict[str, int] = {}
@@ -481,6 +486,10 @@ class Session:
                 self.status = "blocked:context"
                 self.save()
                 raise SessionBlocked(str(exc)) from exc
+            self.guard.observe(self.messages)
+            state_note = self.guard.note(self.messages, budget=min(3200, max(1200, int(msg_budget * 0.12))))
+            if state_note:             # after a compaction: the objective, verified findings and the next action
+                view = view + [{"role": "user", "content": state_note}]
             params: dict[str, Any] = {"temperature": 0.2, "max_tokens": plan.max_tokens}
             if plan.thinking is not None:
                 params["thinking"] = plan.thinking
@@ -672,16 +681,21 @@ class Session:
                     self._nudge("That looked like a tool call written as text, which cannot be executed. Use the structured function-call interface.")
                     continue
                 no_call = text_call = 0
-                if promises_action(content):
-                    pending_nudges += 1
-                    self.ui.notice("model promised an action but did not use a tool", "warn")
-                    if pending_nudges >= 3:
-                        self.status = "blocked:unfulfilled_action"
-                        self.save()
-                        raise SessionBlocked("The model repeatedly promised work without executing a tool. Switch to a tool-capable model or resume with a specific instruction.")
-                    self._nudge("You described a future action but did not execute it. Call a structured tool to do that work now, or explicitly explain why it cannot be done. Do not just describe the next action.")
+                verdict = self.guard.review(text=content, calls=[])
+                if verdict.action == "continue":
+                    self.ui.notice(f"{verdict.kind}: continuing without asking (the request already authorises it)"
+                                   if verdict.kind == "confirmation" else f"{verdict.kind}: continuing the task", "warn")
+                    self.log("guard", kind=verdict.kind, detail=verdict.detail)
+                    self.messages.append({"role": "assistant", "content": content})     # the model's words stay in the transcript
+                    self.messages.append({"role": "user", "content": verdict.note})
+                    self.save()
                     continue
-                pending_nudges = 0
+                if verdict.action == "give_up":
+                    self.messages.append({"role": "assistant", "content": content})
+                    self.status = GUARD_STATUS.get(verdict.kind, "blocked:guard")
+                    self.log("guard", kind="give-up", detail=verdict.detail)
+                    self.save()
+                    raise SessionBlocked(verdict.note)
                 if self.dirty and verify_nudges < 2:
                     verify_nudges += 1
                     self._nudge("You changed files since the last successful command. Run the tests/build now with run_command, or explain precisely why "
@@ -703,12 +717,37 @@ class Session:
                 return content
             no_call = text_call = 0
 
+            # ---- guard: refuse established repeats and malformed commands before anything runs
+            skipped: dict[str, str] = {}
+            verdict = self.guard.review(text=content, calls=[c for c, _, _ in parsed])
+            if verdict.action == "give_up":
+                self.messages.append({"role": "assistant", "content": content})
+                self.status = GUARD_STATUS.get(verdict.kind, "blocked:guard")
+                self.log("guard", kind="give-up", detail=verdict.detail)
+                self.save()
+                raise SessionBlocked(verdict.note)
+            if verdict.action in {"retry", "rewrite"}:
+                kept_by_id = {c["id"]: c for c in (verdict.calls or [])}
+                reason = verdict.note or "[sarness-guard] That call repeated work that is already established; it was not run."
+                for i, (c, n, a) in enumerate(parsed):
+                    if c["id"] not in kept_by_id:
+                        skipped[c["id"]] = reason
+                    else:
+                        new_args = json.loads(kept_by_id[c["id"]]["function"]["arguments"] or "{}")
+                        if new_args != a:
+                            self.ui.notice(f"command repaired before running: {str(new_args.get('command', ''))[:90]}", "warn")
+                            c["function"]["arguments"] = kept_by_id[c["id"]]["function"]["arguments"]
+                            parsed[i] = (c, n, new_args)
+                self.log("guard", kind=verdict.kind, dropped=verdict.dropped)
             # ---- execute: record the assistant turn, then exactly one result per call
             kept = parsed[:MAX_CALLS_PER_TURN]
             self.messages.append({"role": "assistant", "content": content, "tool_calls": [c for c, _, _ in parsed]})
             self.save()
             interrupted = False
             for idx, (call, name, args) in enumerate(parsed):
+                if call["id"] in skipped and not interrupted:
+                    self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": "NOT EXECUTED: " + skipped[call["id"]]})
+                    continue
                 if interrupted or idx >= len(kept):
                     why = "user cancelled" if interrupted else f"more than {MAX_CALLS_PER_TURN} calls in one turn"
                     self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": f"NOT EXECUTED: {why}. Re-issue it if still needed."})
