@@ -25,3 +25,33 @@ shell ignores SIGINT, so the first "interrupt" test never interrupted anything (
 Model-quality observation: the agent's own reasoning about flakiness was once self-contradictory, and its first
 test was tautological. The CLI's verification line reports what ran and exited; it cannot judge test quality,
 so review agent-written tests.
+
+
+
+# Live acceptance: Ctrl+C (2026-10-31, 0.4.1)
+
+Installed `sarness` 0.4.1 and its installed terminal, on the Linux x86_64 desktop and on the DGX Spark (aarch64, built
+there with `sarness tui install`). Every test sends the actual `0x03` byte once through a pseudo-terminal (the Spark
+runs also go through a real `ssh -tt`), then checks the visible effect, the Engine's `active_streams`, that the owned
+command is gone, that no process carrying the run's marker survives, and that the terminal is restored. Real-Engine
+runs used the model that was already loaded (no load or swap), a scratch config/data copy, disposable directories, and
+waited until the Engine had no stream from anyone else and enough free memory (the Spark was running other work).
+
+| check | desktop | Spark |
+| --- | --- | --- |
+| hermetic terminal suite (`tests/test_ctrl_c_tui.py`: startup 0.2-2.5 s, idle, text, generation, shell, `!`, stubborn command) | 13/13 (pristine build from the patch series) | 13/13 (aarch64 binary) |
+| Python suite (native, launcher, everything else) | 453 passed | 453 passed |
+| over `ssh -tt` with a fake engine (idle, generation, shell command, startup) | | 14/14, nothing left on the Spark |
+| real Engine: startup Ctrl+C at 0.4-5 s through the launcher and SSH tunnel | 5/5, no tunnel master left | |
+| real Engine: `sarness` shows model, effort, server, permissions; no OpenCode welcome | yes | yes |
+| real Engine: `/cabinet` opens and one Ctrl+C returns | covered by the hermetic run | yes |
+| real agent task: wrote `calc.py` and `test_calc.py`, ran the test | | yes (test printed PASS) |
+| real generation, one Ctrl+C: stream released, app stays at the prompt | released in 4.2 s | released in 0.3-1.8 s |
+| session continues after the cancel (a reversed-word question the prompt cannot contain) | yes | yes |
+| `!` command and the agent's shell command, one Ctrl+C each | `!` yes | both yes (the process was gone) |
+| idle Ctrl+C exits; the shell is usable; no Sarness process left | yes | yes |
+| resume (`--session`) restores the conversation and answers a new request | yes | yes |
+
+Not covered: cancelling during prefill (the Engine sends response headers only with the first token, so a stream is
+released when prefill ends), and a remote command started by an `ssh` the agent itself runs (Sarness only stops the
+local client).

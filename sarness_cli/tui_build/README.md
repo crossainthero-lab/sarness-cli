@@ -22,3 +22,8 @@ macOS and Windows are not supported by this recipe.
 The patches are `git format-patch v2.0.32..sarness` from a checkout of the fork branch. The fork delta is kept
 small: every Sarness change is marked with a `SARNESS:` comment. To move to a new upstream release, rebase the
 branch onto the new tag, re-export the patches, update `UPSTREAM`, and re-run the upstream TUI tests.
+
+**Patch 0007 (Ctrl+C) lives on its own branch for now.** It was authored as commit `61773cc` on branch `sarness-ctrlc`
+(a separate worktree, `~/Documents/sarness-tui-src/ctrlc`) because the shared `sarness` checkout had someone else's
+uncommitted work. Before running `git format-patch v2.0.32..sarness`, fast-forward or cherry-pick that commit onto
+`sarness`; otherwise the regenerated series silently drops the Ctrl+C fix (`tests/test_ctrl_c_tui.py` fails if it does).
