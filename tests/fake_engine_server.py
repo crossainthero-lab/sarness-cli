@@ -18,6 +18,8 @@ class FakeEngineServer:
     def __init__(self, turns, llm_status=None, system_data=None, registry=None):
         self.turns = list(turns)             # each: list of SSE event dicts
         self.completions = []                # request bodies received
+        self.loads = []                      # /v1/llm/load bodies received
+        self.unloads = 0
         self.llm = llm_status or {"state": "stopped", "model_id": None, "ctx": 8192, "gpu_layers": 999, "active_streams": 0, "last_used": 0}
         self.models_registry = [dict(m) for m in (registry or REGISTRY)]
         self.busy = False
@@ -96,7 +98,10 @@ class FakeEngineServer:
                     if outer.busy:
                         return self._json({"detail": "engine busy"}, 409)
                     mid = body.get("model_id")
+                    outer.loads.append(body)
                     outer.llm.update(state="ready", model_id=mid, model_name=mid)
+                    if body.get("ctx"):
+                        outer.llm["ctx"] = body["ctx"]
                     for m in outer.models_registry:
                         if m.get("id") == mid:
                             m["loaded"] = True
@@ -107,6 +112,7 @@ class FakeEngineServer:
                 if self.path == "/v1/llm/unload":
                     if outer.busy:
                         return self._json({"detail": "engine busy"}, 409)
+                    outer.unloads += 1
                     outer.llm.update(state="stopped", model_id=None)
                     for m in outer.models_registry:
                         if m.get("category") == "llm":

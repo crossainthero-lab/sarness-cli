@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1 - 2026-10-31
+
+### Fixed
+- `sarness code` (and `sarness code "task"`, and plain `sarness` with `runtime = opencode`) refused to start when
+  the configured model was not already loaded. Startup now gets a model ready without disturbing other users
+  (`sarness_cli/startup.py`):
+  - configured model loaded: starts immediately;
+  - nothing loaded: loads the configured model if it is installed, supported and fits in the engine host's free
+    memory with headroom, waits until the engine reports it ready (the engine's load call outlives the 30 s
+    client timeout, so readiness is read from `/v1/llm/status`), then starts;
+  - a different model loaded: never unloaded silently. Interactive: choose *use the loaded model* (default),
+    *switch* (re-checked for a request that started meanwhile; not offered while it is generating) or cancel.
+    Scripted: fails with the exact `--model` / `--allow-model-swap` to use. `--dangerously-skip-permissions`
+    does not imply a swap;
+  - no default model: the model selector (loaded model preselected), and the choice is saved for the server;
+    scripted runs use the loaded model, or the only installed one;
+  - a default given as a name, id or fragment resolves to the engine ref; a default that is no longer installed
+    falls back to the loaded model (scripted) or the selector (interactive);
+  - not enough memory: refuses with the figures; interactive offers another model or cancel, never "load anyway"
+    (`--allow-low-memory` remains the explicit override);
+  - waits for a load already in progress instead of starting a second one; reports load errors, engine `error`
+    state, cancelled loads, a model swapped by another client mid-load, and a timeout; Ctrl+C stops waiting and
+    unloads nothing.
+  The bridge is then started with the engine's live status, so it advertises and pins the real ctx/gpu_layers.
+
+Rollback: `pipx install --force 'git+https://github.com/crossainthero-lab/sarness-cli@v0.3.0'`.
+
 ## 0.3.0 - 2026-10-31
 
 Integrates PR #1 (stream recovery, 0.2.4), PR #2 (unlimited turns, large files) and PR #3 (OpenCode bridge),
