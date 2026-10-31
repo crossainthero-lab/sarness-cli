@@ -69,7 +69,8 @@ mkdir -p "$dest"
 install -m 0755 "$built" "$dest/sarness-tui.new" && mv -f "$dest/sarness-tui.new" "$dest/sarness-tui"
 cp "$src/LICENSE" "$dest/LICENSE-OpenCode"
 cp "$here/UPSTREAM" "$dest/UPSTREAM"
-if [ -L "$install_root/current" ]; then
+# Rebuilding the same build must not overwrite the rollback target with itself.
+if [ -L "$install_root/current" ] && [ "$(readlink "$install_root/current")" != "$(basename "$dest")" ]; then
   ln -sfn "$(readlink "$install_root/current")" "$install_root/previous"
 fi
 ln -sfn "$(basename "$dest")" "$install_root/current"

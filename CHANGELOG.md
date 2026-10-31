@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `sarness tui install` of the build that is already current pointed `previous` at itself, losing the rollback
+  target. `previous` now only moves when the build changes.
+
 ## 0.4.0 - 2026-10-31
 
 ### Added
