@@ -92,7 +92,7 @@ The guard works from outside; the fork changes what the terminal itself loses:
 - The tail of a long command output (where the verdict is) survives into the checkpoint, not only its head.
 - A catalogue of many skills shrinks to one sentence each past 6 000 characters (the skill tool still loads the full text).
 - Automatic compaction follows the launcher's default (`autocompact`, on) unless a session chose with `/autocompact`.
-- Ctrl+C cancels a command or prompt submitted a moment ago.
+- Ctrl+C stops a `!` command the client has not listed yet.
 
 ## Settings and debugging
 

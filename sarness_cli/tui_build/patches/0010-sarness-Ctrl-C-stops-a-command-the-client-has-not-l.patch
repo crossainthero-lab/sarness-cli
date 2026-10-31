@@ -1,0 +1,65 @@
+From a7f6ca11a9b92b1896eba54badd0f158ff1c8867 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sun, 1 Nov 2026 01:01:30 +1100
+Subject: [PATCH] sarness: Ctrl+C stops a '!' command that the client has not
+ listed yet
+
+A Ctrl+C that arrived after a '!' command was submitted but before the client had been told it was running found nothing
+to stop: the command kept running (about one run in three in the PTY tests). Cancelling now keeps looking for the
+user's own command for a few seconds, stops it as soon as it is listed, and never stops a command the user did not start.
+---
+ packages/tui/src/component/prompt/index.tsx | 21 +++++++++++++++++----
+ packages/tui/test/sarness-ctrl-c.test.ts    |  7 +++++++
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 9a16519..c23fde4 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -583,10 +583,23 @@ export function Prompt(props: PromptProps) {
+           if (store.mode === "shell" && store.prompt.text === "") setStore("mode", "normal")
+           if (status() === "running") void client.api.session.interrupt({ sessionID, resume: false })
+           // Only the commands this composer started: a background server the agent launched keeps running.
+-          const owned = userShells()
+-          for (const shell of data.shell.listBySession(sessionID)) {
+-            if (shell.status !== "running" || !owned.includes(shell.command)) continue
+-            void client.api.shell.remove({ id: shell.id, location: { directory: shell.location.directory } })
++          const stopped = new Set<string>()
++          const stopOwned = () => {
++            const owned = userShells()
++            for (const shell of data.shell.listBySession(sessionID)) {
++              if (shell.status !== "running" || !owned.includes(shell.command) || stopped.has(shell.id)) continue
++              stopped.add(shell.id)
++              void client.api.shell.remove({ id: shell.id, location: { directory: shell.location.directory } }).catch(() => {})
++            }
++          }
++          stopOwned()
++          // The command may have been submitted a moment ago and not be listed yet: keep looking for it briefly.
++          if (userShells().length > 0) {
++            let tries = 0
++            const timer = setInterval(() => {
++              if (userShells().length === 0 || ++tries > 40) return clearInterval(timer)
++              stopOwned()
++            }, 100)
+           }
+           toast.show({
+             title: "Cancelled",
+diff --git a/packages/tui/test/sarness-ctrl-c.test.ts b/packages/tui/test/sarness-ctrl-c.test.ts
+index 4924a07..086dc7a 100644
+--- a/packages/tui/test/sarness-ctrl-c.test.ts
++++ b/packages/tui/test/sarness-ctrl-c.test.ts
+@@ -26,4 +26,11 @@ describe("sarness Ctrl+C", () => {
+     expect(prompt).toContain("resume: false")
+     expect(prompt).toContain("trackUserShell(target, inputText)")
+   })
++
++  test("cancelling a `!` command keeps looking for one that the client has not listed yet", () => {
++    const prompt = source("../src/component/prompt/index.tsx")
++    expect(prompt).toContain("const stopOwned = () =>")
++    expect(prompt).toContain("keep looking for it briefly")
++    expect(prompt).toMatch(/enabled: \(status\(\) === "running" \|\| userShells\(\)\.length > 0\) && !!props\.sessionID/)
++  })
+ })
+-- 
+2.53.0
+

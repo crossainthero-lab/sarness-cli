@@ -37,9 +37,9 @@ progress it cannot show. Both runtimes (the Sarness terminal and `sarness native
   after an edit, a file whose text was compacted away) is untouched. There is still no cap on the number of steps.
 - `sshuser@host` (no space after `ssh`) is repaired to `ssh user@host` and the repair is recorded. Other mistakes are
   reported, not rewritten.
-- **Ctrl+C could still be lost** in the instant after a `!` command or prompt was submitted, before the client had been
-  told it was running (the `!` cancel test failed about one run in three). A just-submitted command or prompt now
-  counts as active work (patch 0010).
+- **Ctrl+C could still be lost** when it landed after a `!` command was submitted but before the client had been told
+  it was running: the command kept running (the `!` cancel test failed about one run in three). Cancelling now keeps
+  looking for the user's own command for a few seconds and stops it as soon as it is listed (patch 0010).
 
 ### Changed
 - Automatic compaction is on by default (setting `autocompact`, default `on`; `/autocompact on|off|status` per

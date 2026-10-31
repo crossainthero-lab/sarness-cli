@@ -159,7 +159,7 @@ def test_ctrl_c_cancels_a_generation_and_releases_the_engine_stream(tui):
 
 
 def test_ctrl_c_pressed_right_after_enter_cancels_the_new_prompt_instead_of_quitting(tui):
-    """Before the server has reported a prompt as running, Ctrl+C used to find nothing to stop and quit the app (or be lost)."""
+    """A Ctrl+C with no pause after Enter must cancel the new prompt, not quit the app and not be lost."""
     session = tui()
     server = tui.server
     session.type("SLOWGEN")

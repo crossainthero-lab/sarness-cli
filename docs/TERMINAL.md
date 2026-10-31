@@ -37,7 +37,7 @@ variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, 
 | home | SARNESS wordmark (3 rows) top-left, a muted tagline, and the composer at the bottom. The footer shows the `sarness` version. The exit screen and `run` splash use the Sarness mark |
 | commands | `/cabinet` suspends the TUI and runs the real `sarness cabinet` (then Enter returns). `/connect` explains that models come only from Sarness Engine. Cloud "free models" onboarding is removed |
 | effort | the launch config's variant (your `--effort`/setting) starts each new session until you pick one with `ctrl+t` |
-| ctrl+c | `app.tsx`, `component/prompt/index.tsx`, `config/keybind.ts` (patch 0007): the first press cancels running work, else clears, else exits; works during startup (see below). Patch 0010: also cancels a command or prompt submitted a moment ago |
+| ctrl+c | `app.tsx`, `component/prompt/index.tsx`, `config/keybind.ts` (patch 0007): the first press cancels running work, else clears, else exits; works during startup (see below). Patch 0010: also stops a `!` command the client has not listed yet |
 | auto-compaction | patch 0008: `/autocompact on\|off\|status` per session, shown in the sidebar; patch 0009: a session that never chose follows the launcher's default (`SARNESS_AUTOCOMPACT_DEFAULT`, from the `autocompact` setting) |
 | compaction | patch 0009 (`session/compaction.ts`, `runner/to-llm-message.ts`): working room for 32-64k windows, a bounded verbatim part, the user's request always kept beside the summary, the tail of long outputs kept, a checkpoint that says the request is still in force. `skill/instructions.ts`: a large skills catalogue shrinks to one sentence each. See docs/GUARD.md |
 
