@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -30,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import __version__, tui
 from .engine import EngineError
 
 MAX_BODY = 32 * 1024 * 1024
@@ -51,8 +53,15 @@ def model_context(model: dict[str, Any], live: dict[str, Any] | None) -> int:
     return max(2048, int(model.get("default_ctx") or model.get("context_max") or 32768))
 
 
+def display_name(model: dict[str, Any]) -> str:
+    """'Qwen3.6 35B-A3B (vision) · MXFP4_MOE' -> 'Qwen3.6 35B-A3B': the info line under the prompt stays short."""
+    name = str(model.get("name") or model.get("ref") or "")
+    return re.sub(r"\s*\((?:vision)\)", "", name.split(" · ")[0]).strip() or name
+
+
 def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: str, *,
-                    live: dict[str, Any] | None = None, permission: dict[str, Any] | None = None) -> dict[str, Any]:
+                    live: dict[str, Any] | None = None, permission: dict[str, Any] | None = None,
+                    effort: str | None = None) -> dict[str, Any]:
     """OpenCode 2.x configuration (`providers` schema) for the Sarness bridge provider."""
     catalog: dict[str, Any] = {}
     for m in models:
@@ -64,7 +73,7 @@ def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: s
         ctx = model_context(m, live)
         catalog[ref] = {
             "modelID": ref,
-            "name": str(m.get("name") or ref),
+            "name": display_name(m),
             "limit": {"context": ctx, "output": output_limit(ctx)},
             "capabilities": {
                 "tools": True, "temperature": True,
@@ -79,7 +88,9 @@ def opencode_config(url: str, models: list[dict[str, Any]], default: str, key: s
         raise ValueError(f"The selected Sarness model {default!r} is unavailable (a local model must be loaded first)")
     cfg: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
-        "model": f"sarness/{default}",
+        # Explicit selection so the terminal starts on the configured effort variant ("max" -> the top variant).
+        "model": {"providerID": "sarness", "model": default,
+                  "variant": effort if effort in EFFORTS else ("high" if effort == "max" else "medium")},
         "small_model": f"sarness/{default}",
         "autoupdate": False,
         "share": "disabled",
@@ -124,10 +135,10 @@ def opencode_major(version_text: str) -> int:
     """Fail closed when the installed OpenCode version cannot be identified or was never validated."""
     match = re.search(r"(?<![0-9])([0-9]+)\.[0-9]+(?:\.[0-9]+)?", version_text)
     if not match:
-        raise RuntimeError(f"Cannot identify OpenCode version from {version_text!r}")
+        raise RuntimeError(f"Cannot identify the Sarness terminal version from {version_text!r}")
     major = int(match.group(1))
     if major != VALIDATED_MAJOR:
-        raise RuntimeError(f"OpenCode {version_text.strip()} is not supported; the Sarness bridge is validated "
+        raise RuntimeError(f"{version_text.strip()} is not supported; the Sarness bridge is validated "
                            f"against OpenCode {VALIDATED_MAJOR}.x")
     return major
 
@@ -450,14 +461,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def opencode_binary() -> str:
-    found = shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode")
-    if not os.access(found, os.X_OK):
-        raise RuntimeError("OpenCode is not installed (https://opencode.ai/install), or put it on PATH.")
-    return found
+    """The Sarness terminal (forked OpenCode). A separately installed `opencode` is never used or modified."""
+    return str(tui.require_binary())
 
 
-def opencode_env(cfg: dict[str, Any], workspace: Path, config_dir: Path | None = None) -> dict[str, str]:
+def opencode_env(cfg: dict[str, Any], workspace: Path, config_dir: Path | None = None, *,
+                 server: str | None = None, mode: str | None = None, effort: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
+    # Display facts for the terminal's info line and delegated commands; enforcement stays in cfg and the bridge.
+    env.update({"SARNESS_TUI": "1", "SARNESS_VERSION": __version__, "SARNESS_BIN": tui.sarness_executable()})
+    if server:
+        env["SARNESS_SERVER"] = server
+    if mode:
+        env["SARNESS_MODE"] = mode
+    if effort:
+        env["SARNESS_EFFORT"] = effort
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(cfg)
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
@@ -482,10 +500,24 @@ def opencode_command(binary: str, workspace: Path, mode: str, args: list[str] | 
     return cmd
 
 
+def run_foreground(cmd: list[str], **kw: Any) -> int:
+    """Run the terminal as the foreground program. Ctrl+C belongs to it (cancel a turn, clear input, exit): the
+    launcher must not die on SIGINT, because subprocess.call would then kill the terminal mid-session."""
+    # A handler, not SIG_IGN: an ignored disposition would be inherited by the terminal and every command it runs.
+    previous = (signal.signal(signal.SIGINT, lambda *_: None)
+                if threading.current_thread() is threading.main_thread() else None)
+    try:
+        proc = subprocess.Popen(cmd, **kw)
+        return proc.wait()
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+
+
 def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, workspace: Path, *,
                     mode: str = "auto", effort: str = "medium", live: dict[str, Any] | None = None,
                     args: list[str] | None = None, tui_args: list[str] | None = None,
-                    config_dir: Path | None = None) -> int:
+                    config_dir: Path | None = None, server: str | None = None) -> int:
     """Run OpenCode against a temporary, authenticated, loopback-only bridge. `args` go to OpenCode
     (e.g. ["run", "--format", "json", "task"]); the default is the interactive TUI in `workspace`."""
     binary = opencode_binary()
@@ -495,9 +527,10 @@ def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, wo
     bridge = BridgeServer(engine, models, effort=effort)
     bridge.start()
     try:
-        cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode))
-        return subprocess.call(opencode_command(binary, workspace, mode, args, tui_args), cwd=workspace,
-                               env=opencode_env(cfg, workspace, config_dir))
+        cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode),
+                              effort=effort)
+        return run_foreground(opencode_command(binary, workspace, mode, args, tui_args), cwd=workspace,
+                              env=opencode_env(cfg, workspace, config_dir, server=server, mode=mode, effort=effort))
     finally:
         bridge.shutdown()
         bridge.server_close()

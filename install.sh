@@ -64,5 +64,9 @@ if [ "$CHECK" = 0 ]; then
   hash -r
   say "• verifying in a fresh login shell:"
   bash -lc 'command -v sarness && sarness --version'
-  say "Done. Next: sarness setup"
+  if bash -lc 'sarness tui path' >/dev/null 2>&1; then
+    say "Done. Next: sarness setup (if not done yet), then 'sarness' in a project"
+  else
+    say "Done. Next: sarness setup, then 'sarness tui install' to build the Sarness terminal"
+  fi
 fi

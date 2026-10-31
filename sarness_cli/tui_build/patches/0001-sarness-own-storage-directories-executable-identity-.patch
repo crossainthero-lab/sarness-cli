@@ -1,0 +1,399 @@
+From 819016b83b6fcdd9ec4887219ade8871235591d7 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 13:52:57 +1100
+Subject: [PATCH 1/6] sarness: own storage directories, executable identity and
+ installer behaviour
+
+- data/config/state/cache under sarness-code, so a separate opencode install is never read or modified
+- executable name sarness-tui; user-facing CLI strings say Sarness
+- upgrade/uninstall refuse: Sarness installs and upgrades its terminal itself
+---
+ packages/cli/script/build.ts                  |  4 +--
+ packages/cli/src/acp/error.ts                 |  2 +-
+ packages/cli/src/acp/service.ts               |  4 +--
+ packages/cli/src/acp/translate.ts             |  2 +-
+ packages/cli/src/commands/commands.ts         | 10 +++----
+ packages/cli/src/commands/handlers/default.ts |  2 +-
+ packages/cli/src/commands/handlers/pair.ts    |  2 +-
+ .../cli/src/commands/handlers/uninstall.ts    |  7 +++--
+ packages/cli/src/commands/handlers/upgrade.ts |  5 +++-
+ .../cli/src/services/update-preflight.tsx     |  8 ++---
+ packages/cli/src/services/updater.ts          | 30 +++++++++----------
+ packages/util/src/global.ts                   |  3 +-
+ 12 files changed, 43 insertions(+), 36 deletions(-)
+
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index 3cac51e..292a043 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -180,7 +180,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       outfile: path.join(outdir, name, "bin", binary),
+       execArgv: [
+         "--smol",
+-        `--user-agent=opencode/${Script.channel}/${Script.version}/cli`,
++        `--user-agent=sarness-tui/${Script.channel}/${Script.version}/cli`,
+         "--use-system-ca",
+         "--no-warnings",
+         "--",
+@@ -189,7 +189,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+     },
+     define: {
+       OPENCODE_VERSION: `'${Script.version}'`,
+-      OPENCODE_CLI_NAME: "'opencode'",
++      OPENCODE_CLI_NAME: "'sarness-tui'", // SARNESS
+       OPENCODE_CHANNEL: `'${Script.channel}'`,
+       OPENCODE_ARTIFACT: `'cli'`,
+       ...(highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(highlights) } : {}),
+diff --git a/packages/cli/src/acp/error.ts b/packages/cli/src/acp/error.ts
+index ef26f0e..774ad48 100644
+--- a/packages/cli/src/acp/error.ts
++++ b/packages/cli/src/acp/error.ts
+@@ -125,7 +125,7 @@ export function toRequestError(error: Error): RequestError {
+         error.safeMessage,
+       )
+     case "ACPServerUnavailableError":
+-      return RequestError.internalError({ errorName: "ServerUnavailable" }, "OpenCode server is unavailable")
++      return RequestError.internalError({ errorName: "ServerUnavailable" }, "Sarness server is unavailable")
+   }
+   const exhaustive: never = error
+   return exhaustive
+diff --git a/packages/cli/src/acp/service.ts b/packages/cli/src/acp/service.ts
+index 4e10bea..5c78e2c 100644
+--- a/packages/cli/src/acp/service.ts
++++ b/packages/cli/src/acp/service.ts
+@@ -113,7 +113,7 @@ export function make(input: {
+       }
+       if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
+         authMethod._meta = {
+-          "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "OpenCode Login" },
++          "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "Sarness Login" },
+         }
+       }
+       return {
+@@ -126,7 +126,7 @@ export function make(input: {
+           _meta: { [ACPCapabilities.ChildSessionUpdates]: true },
+         },
+         authMethods: [authMethod],
+-        agentInfo: { name: "OpenCode", version: OPENCODE_VERSION },
++        agentInfo: { name: "Sarness", version: OPENCODE_VERSION },
+       }
+     }),
+     authenticate: Effect.fnUntraced(function* (params) {
+diff --git a/packages/cli/src/acp/translate.ts b/packages/cli/src/acp/translate.ts
+index c6960b4..4bd6743 100644
+--- a/packages/cli/src/acp/translate.ts
++++ b/packages/cli/src/acp/translate.ts
+@@ -139,7 +139,7 @@ export function failure(state: TurnState) {
+   if (error?.type === "provider.auth") return new ACPError.AuthRequiredError()
+   if (error && error.type !== "aborted" && error.type !== "provider.content-filter") {
+     return new ACPError.ServiceFailureError({
+-      safeMessage: error.message || "OpenCode prompt failed",
++      safeMessage: error.message || "Sarness prompt failed",
+       service: "session",
+       errorName: error.type,
+     })
+diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
+index ba3454b..fea51c4 100644
+--- a/packages/cli/src/commands/commands.ts
++++ b/packages/cli/src/commands/commands.ts
+@@ -36,12 +36,12 @@ const PermissionParams = {
+ }
+ 
+ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencode", {
+-  description: "OpenCode command line interface",
++  description: "Sarness command line interface",
+   params: {
+     ...ServerParams,
+     ...PermissionParams,
+     directory: Argument.String("directory").pipe(
+-      Argument.withDescription("Directory to start OpenCode in"),
++      Argument.withDescription("Directory to start Sarness in"),
+       Argument.optional,
+     ),
+     continue: Flag.Boolean("continue").pipe(
+@@ -58,7 +58,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
+   },
+   commands: [
+     Spec.make("upgrade", {
+-      description: "Upgrade OpenCode to the latest or a specific version",
++      description: "Upgrade Sarness to the latest or a specific version",
+       aliases: ["update"],
+       params: {
+         target: Argument.String("target").pipe(
+@@ -73,7 +73,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
+       },
+     }),
+     Spec.make("uninstall", {
+-      description: "Uninstall OpenCode, keeping session data, configuration, and state",
++      description: "Uninstall Sarness, keeping session data, configuration, and state",
+       params: {
+         dryRun: Flag.Boolean("dry-run").pipe(
+           Flag.withDescription("Show what would be removed without removing"),
+@@ -374,7 +374,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
+       },
+     }),
+     Spec.make("run", {
+-      description: "Run OpenCode with a message",
++      description: "Run Sarness with a message",
+       params: {
+         ...ServerParams,
+         message: Argument.String("message").pipe(
+diff --git a/packages/cli/src/commands/handlers/default.ts b/packages/cli/src/commands/handlers/default.ts
+index cbf9d43..e030aa7 100644
+--- a/packages/cli/src/commands/handlers/default.ts
++++ b/packages/cli/src/commands/handlers/default.ts
+@@ -47,7 +47,7 @@ export default Runtime.handler(Commands, (input) =>
+       },
+     }).pipe(
+       Effect.tapError(() =>
+-        Effect.promise(() => preflight.fail("OpenCode update could not start the new background service")),
++        Effect.promise(() => preflight.fail("Sarness update could not start the new background service")),
+       ),
+     )
+     const session = Option.getOrUndefined(input.session)
+diff --git a/packages/cli/src/commands/handlers/pair.ts b/packages/cli/src/commands/handlers/pair.ts
+index f1f0a4b..7848231 100644
+--- a/packages/cli/src/commands/handlers/pair.ts
++++ b/packages/cli/src/commands/handlers/pair.ts
+@@ -70,7 +70,7 @@ export default Runtime.handler(
+ )
+ 
+ export const remoteWarning = [
+-  "This will expose your OpenCode server to the internet.",
++  "This will expose your Sarness server to the internet.",
+   "Traffic is end-to-end encrypted, and access requires your server password.",
+   "To pair locally instead, run `opencode pair` without the --remote flag.",
+ ].join(EOL)
+diff --git a/packages/cli/src/commands/handlers/uninstall.ts b/packages/cli/src/commands/handlers/uninstall.ts
+index 7f6393c..549e146 100644
+--- a/packages/cli/src/commands/handlers/uninstall.ts
++++ b/packages/cli/src/commands/handlers/uninstall.ts
+@@ -14,7 +14,10 @@ import { errorMessage } from "../../util/error"
+ export default Runtime.handler(
+   Commands.commands.uninstall,
+   Effect.fn("cli.uninstall")(function* (input) {
+-    intro("Uninstall OpenCode")
++    intro("Uninstall Sarness")
++    // SARNESS: never let the upstream uninstaller guess an install method (it could act on a separate `opencode`).
++    if (!process.env.SARNESS_ALLOW_UPSTREAM_UPDATER)
++      return yield* Effect.fail(new Error("Remove Sarness with `pipx uninstall sarness-cli`; its terminal lives in ~/.local/share/sarness-cli/tui."))
+     const fs = yield* FileSystem.FileSystem
+     const global = yield* Global.Service
+     const updater = yield* Updater.Service
+@@ -29,7 +32,7 @@ export default Runtime.handler(
+     const shell = method === "curl" ? yield* shellConfigs(global.home) : []
+ 
+     log.info(`Installation method: ${method ?? "unknown"}`)
+-    log.message("The following global files will be removed (shared by OpenCode versions and channels):")
++    log.message("The following global files will be removed (shared by Sarness versions and channels):")
+     if (yield* fs.exists(global.cache)) log.info(`  Cache: ${global.cache}`)
+     services.forEach((name) =>
+       log.info(`  Stop background service and persistent terminals: ${path.join(global.state, name)}`),
+diff --git a/packages/cli/src/commands/handlers/upgrade.ts b/packages/cli/src/commands/handlers/upgrade.ts
+index af7c221..c7fe139 100644
+--- a/packages/cli/src/commands/handlers/upgrade.ts
++++ b/packages/cli/src/commands/handlers/upgrade.ts
+@@ -12,6 +12,9 @@ export default Runtime.handler(
+   Effect.fn("cli.upgrade")(
+     function* (input) {
+       intro("Upgrade")
++      // SARNESS: this terminal is installed and upgraded by the Sarness CLI, never by the upstream updater.
++      if (!process.env.SARNESS_ALLOW_UPSTREAM_UPDATER)
++        return yield* Effect.fail(new Error("Sarness is upgraded with `sarness upgrade` (and `sarness tui install`)."))
+       const updater = yield* Updater.Service
+       const method = Option.getOrUndefined(input.method) ?? (yield* updater.method())
+       if (!method)
+@@ -23,7 +26,7 @@ export default Runtime.handler(
+       const target = Option.getOrUndefined(input.target) ?? (yield* updater.latest(method))
+       const version = target.trim().replace(/^v/, "")
+       if (version === OPENCODE_VERSION) {
+-        log.warn(`OpenCode upgrade skipped: ${version} is already installed`)
++        log.warn(`Sarness upgrade skipped: ${version} is already installed`)
+         outro("Done")
+         return
+       }
+diff --git a/packages/cli/src/services/update-preflight.tsx b/packages/cli/src/services/update-preflight.tsx
+index f5e76d9..2dfe4c7 100644
+--- a/packages/cli/src/services/update-preflight.tsx
++++ b/packages/cli/src/services/update-preflight.tsx
+@@ -22,7 +22,7 @@ import {
+   untrack,
+ } from "solid-js"
+ 
+-const stages = ["Keeping your session safe", "Starting the new background service", "Loading OpenCode"] as const
++const stages = ["Keeping your session safe", "Starting the new background service", "Loading Sarness"] as const
+ const stageFloor = 480
+ const transitionDuration = 420
+ const completionHold = 650
+@@ -325,7 +325,7 @@ function UpdateFooter(props: {
+   const statusSweep = createSweep()
+   const runningHeader = () =>
+     phrase(
+-      ["OpenCode", colors.muted, true],
++      ["Sarness", colors.muted, true],
+       ["is updating", colors.muted],
+       ...(props.from
+         ? ([
+@@ -337,11 +337,11 @@ function UpdateFooter(props: {
+       [OPENCODE_VERSION, colors.accent],
+     )
+   const completedHeader = phrase(
+-    ["OpenCode", colors.muted, true],
++    ["Sarness", colors.muted, true],
+     ["updated to", colors.muted],
+     [OPENCODE_VERSION, colors.accent],
+   )
+-  const pausedHeader = phrase(["OpenCode", colors.muted, true], ["update paused", colors.muted])
++  const pausedHeader = phrase(["Sarness", colors.muted, true], ["update paused", colors.muted])
+   const outcomeStatus = () =>
+     props.outcome() === "success"
+       ? [...styled("✓", colors.success), ...styled(" Ready", colors.text)]
+diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
+index 736e8f8..e6fa249 100644
+--- a/packages/cli/src/services/updater.ts
++++ b/packages/cli/src/services/updater.ts
+@@ -46,7 +46,7 @@ const decodeVpPackages = Schema.decodeUnknownOption(
+ )
+ 
+ const installNames: Record<Method, string> = {
+-  curl: "The OpenCode installer",
++  curl: "The Sarness installer",
+   npm: "npm",
+   pnpm: "pnpm",
+   bun: "Bun",
+@@ -204,8 +204,8 @@ const make = Effect.gen(function* () {
+     if (bash && (yield* fs.exists(bash).pipe(Effect.orElseSucceed(() => false)))) return bash
+     return yield* Effect.fail(
+       new UpgradeError({
+-        title: "Git Bash is required to update OpenCode",
+-        detail: "The OpenCode installer runs with Git Bash on Windows, and it was not found.",
++        title: "Git Bash is required to update Sarness",
++        detail: "The Sarness installer runs with Git Bash on Windows, and it was not found.",
+         retry: "Install Git for Windows or set OPENCODE_GIT_BASH_PATH, then run opencode upgrade again.",
+       }),
+     )
+@@ -289,7 +289,7 @@ const make = Effect.gen(function* () {
+       catch: (cause) =>
+         new UpgradeError(
+           {
+-            title: "Could not check for OpenCode updates",
++            title: "Could not check for Sarness updates",
+             detail: errorDetail(cause),
+             retry: "Check your network, then run opencode upgrade again.",
+           },
+@@ -299,7 +299,7 @@ const make = Effect.gen(function* () {
+     if (!response.ok)
+       return yield* Effect.fail(
+         new UpgradeError({
+-          title: "Could not check for OpenCode updates",
++          title: "Could not check for Sarness updates",
+           detail: `The update service returned HTTP ${response.status}.`,
+           retry: "Try again in a few minutes.",
+         }),
+@@ -310,7 +310,7 @@ const make = Effect.gen(function* () {
+         catch: (cause) =>
+           new UpgradeError(
+             {
+-              title: "Could not read the OpenCode update information",
++              title: "Could not read the Sarness update information",
+               detail: errorDetail(cause),
+               retry: "Try again in a few minutes.",
+             },
+@@ -322,7 +322,7 @@ const make = Effect.gen(function* () {
+     if (!version || !packageName)
+       return yield* Effect.fail(
+         new UpgradeError({
+-          title: "Could not read the OpenCode update information",
++          title: "Could not read the Sarness update information",
+           detail: "The update service returned incomplete release information.",
+           retry: "Try again in a few minutes.",
+         }),
+@@ -335,7 +335,7 @@ const make = Effect.gen(function* () {
+     const failure = (detail: string, cause?: unknown) =>
+       new UpgradeError(
+         {
+-          title: "Could not check for OpenCode updates",
++          title: "Could not check for Sarness updates",
+           detail,
+           command: ["winget", "search", ...wingetArgs].join(" "),
+           retry: "Fix the issue above, then run opencode upgrade again.",
+@@ -398,7 +398,7 @@ const make = Effect.gen(function* () {
+     const failure = (detail: string, cause?: unknown) =>
+       new UpgradeError(
+         {
+-          title: input.title ?? `${installNames[input.method]} could not install OpenCode`,
++          title: input.title ?? `${installNames[input.method]} could not install Sarness`,
+           detail,
+           command: (input.displayCommand ?? input.command).join(" "),
+           retry: input.retry ?? "Fix the issue above, then run opencode upgrade again.",
+@@ -481,7 +481,7 @@ const make = Effect.gen(function* () {
+             method,
+             command: ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
+             displayCommand: ["curl", "-fsSL", "https://opencode.ai/v2/install"],
+-            title: "Could not download the OpenCode installer",
++            title: "Could not download the Sarness installer",
+             retry: "Check your network, then run opencode upgrade again.",
+           })
+           return yield* retaining(
+@@ -490,7 +490,7 @@ const make = Effect.gen(function* () {
+               method,
+               command: [bash, installer, "--version", version, "--no-modify-path"],
+               displayCommand: ["opencode", "upgrade", version, "--method", "curl"],
+-              title: "The OpenCode installer failed",
++              title: "The Sarness installer failed",
+             }),
+           )
+         }
+@@ -519,7 +519,7 @@ const make = Effect.gen(function* () {
+           ? cause
+           : new UpgradeError(
+               {
+-                title: "Could not prepare the OpenCode upgrade",
++                title: "Could not prepare the Sarness upgrade",
+                 detail: errorDetail(cause),
+                 retry: "Fix the issue above, then run opencode upgrade again.",
+               },
+@@ -556,7 +556,7 @@ const make = Effect.gen(function* () {
+       yield* Effect.logInfo("update check done", { action: "up-to-date" })
+       return undefined
+     }
+-    yield* Effect.logInfo("OpenCode update available", { current, latest: version, action: next })
++    yield* Effect.logInfo("Sarness update available", { current, latest: version, action: next })
+     return { policy, version }
+   })
+ 
+@@ -569,7 +569,7 @@ const make = Effect.gen(function* () {
+     const current = yield* Ref.get(installedVersion)
+     yield* upgrade(detected, version)
+     yield* Ref.set(installedVersion, version)
+-    yield* Effect.logInfo("updated OpenCode", { from: current, to: version, method: detected })
++    yield* Effect.logInfo("updated Sarness", { from: current, to: version, method: detected })
+     return true
+   })
+ 
+@@ -586,7 +586,7 @@ const make = Effect.gen(function* () {
+     if (OPENCODE_LOCAL)
+       return {
+         type: "unavailable" as const,
+-        message: "This build runs from a source checkout. Use an installed OpenCode release to check for updates.",
++        message: "This build runs from a source checkout. Use an installed Sarness release to check for updates.",
+       }
+     const detected = yield* method()
+     if (!detected)
+diff --git a/packages/util/src/global.ts b/packages/util/src/global.ts
+index 5fe51f8..7873282 100644
+--- a/packages/util/src/global.ts
++++ b/packages/util/src/global.ts
+@@ -9,7 +9,8 @@ import { roots } from "#global-roots"
+ import { Flock } from "./flock.js"
+ import { makeGlobalNode } from "./effect/app-node.js"
+ 
+-const app = "opencode"
++// SARNESS: own data/config/state dirs, so the standalone `opencode` install is never read or modified.
++const app = "sarness-code"
+ const { data, cache, config, state, tmp } = roots(app)
+ 
+ const paths = {
+-- 
+2.53.0
+

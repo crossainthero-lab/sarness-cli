@@ -94,7 +94,7 @@ def chat(stream=False, **kw):
 def test_config_uses_v2_providers_schema_and_the_loaded_context():
     cfg = opencode_config("http://127.0.0.1:9922/v1", [MODEL], MODEL["ref"], "k", live=LIVE)
     provider = cfg["providers"]["sarness"]
-    assert cfg["model"] == "sarness/local:qwen-test"
+    assert cfg["model"] == {"providerID": "sarness", "model": "local:qwen-test", "variant": "medium"}
     assert provider["package"] == "@opencode/ai/providers/openai-compatible"
     assert provider["settings"]["baseURL"] == "http://127.0.0.1:9922/v1"
     entry = provider["models"][MODEL["ref"]]
@@ -105,6 +105,15 @@ def test_config_uses_v2_providers_schema_and_the_loaded_context():
     assert [v["id"] for v in entry["variants"]] == ["low", "medium", "high"]
     assert entry["variants"][2]["body"] == {"reasoning_effort": "high"}
     assert entry["compatibility"]["reasoningField"] == "reasoning_content"
+
+
+def test_config_starts_on_the_configured_effort_variant_and_short_name():
+    for effort, variant in (("low", "low"), ("high", "high"), ("max", "high"), (None, "medium")):
+        cfg = opencode_config("http://127.0.0.1:1/v1", [MODEL], MODEL["ref"], "k", live=LIVE, effort=effort)
+        assert cfg["model"]["variant"] == variant
+    named = dict(MODEL, name="Qwen3.6 35B-A3B (vision) · MXFP4_MOE")
+    cfg = opencode_config("http://127.0.0.1:1/v1", [named], MODEL["ref"], "k", live=LIVE)
+    assert cfg["providers"]["sarness"]["models"][MODEL["ref"]]["name"] == "Qwen3.6 35B-A3B"
 
 
 def test_config_never_offers_an_unloaded_local_model():
@@ -309,3 +318,14 @@ def test_launch_fails_closed_without_opencode(monkeypatch, tmp_path):
     monkeypatch.setattr(ob.Path, "home", staticmethod(lambda: Path(tmp_path)))
     with pytest.raises(RuntimeError, match="not installed"):
         ob.launch_opencode(FakeBridgeEngine(), [MODEL], MODEL["ref"], tmp_path, live=LIVE)
+
+
+def test_launcher_survives_ctrl_c_and_the_terminal_keeps_default_sigint():
+    import signal
+    import sys
+    from sarness_cli.openai_bridge import run_foreground
+    code = ("import os, signal, sys; os.kill(os.getppid(), signal.SIGINT); "
+            "sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.default_int_handler else 7)")
+    before = signal.getsignal(signal.SIGINT)
+    assert run_foreground([sys.executable, "-c", code]) == 0     # parent got SIGINT and did not die or kill the child
+    assert signal.getsignal(signal.SIGINT) is before

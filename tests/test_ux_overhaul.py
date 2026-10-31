@@ -326,7 +326,7 @@ def test_pty_sarness_bypass_flag(tmp_path):
         "profiles": {
             "fake": {"transport": "direct", "url": "http://127.0.0.1:9999", "model": "local:coder@Q4"}
         },
-        "settings": {"server": "fake", "permissions": "ask"}
+        "settings": {"server": "fake", "permissions": "ask", "runtime": "native"}
     }))
     cfg_file.chmod(0o600)
     secrets_file = tmp_path / ".config" / "sarness-cli" / "secrets.json"
@@ -388,7 +388,7 @@ def test_pty_sarness_resume_specific_session(tmp_path):
         "profiles": {
             "fake": {"transport": "direct", "url": "http://127.0.0.1:9999", "model": "local:coder@Q4"}
         },
-        "settings": {"server": "fake", "permissions": "ask"}
+        "settings": {"server": "fake", "permissions": "ask", "runtime": "native"}
     }))
     cfg_file.chmod(0o600)
     secrets_file = tmp_path / ".config" / "sarness-cli" / "secrets.json"

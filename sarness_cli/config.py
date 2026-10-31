@@ -63,12 +63,12 @@ DEFAULTS: dict[str, Any] = {
     "show_reasoning": False,
     "log_level": "basic",        # off | basic | verbose
     "session_dir": None,
-    "runtime": "native",         # native | opencode (OpenCode TUI over the authenticated Sarness bridge)
+    "runtime": "tui",            # tui (the Sarness terminal, forked OpenCode) | native (Python REPL); "opencode" = tui
 }
 # Setting -> (validator description, check)
 _CHECKS = {
     "effort": lambda v: v in EFFORTS,
-    "runtime": lambda v: v in ("native", "opencode"),
+    "runtime": lambda v: v in ("tui", "native", "opencode"),
     "thinking": lambda v: v in THINKING,
     "permissions": lambda v: v in SAVEABLE_MODES,
     "log_level": lambda v: v in ("off", "basic", "verbose"),

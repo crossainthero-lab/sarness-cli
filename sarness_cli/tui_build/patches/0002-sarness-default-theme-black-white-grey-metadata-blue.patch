@@ -1,0 +1,515 @@
+From 1b611d7bfca5d6d48984705fd78f0ab617ab619e Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 13:52:57 +1100
+Subject: [PATCH 2/6] sarness: default theme (black, white, grey metadata, blue
+ accents, no violet)
+
+---
+ packages/tui/src/component/dialog-config.tsx  |   2 +-
+ packages/tui/src/context/theme.tsx            |  14 +-
+ packages/tui/src/theme/assets/v2/sarness.json | 387 ++++++++++++++++++
+ packages/tui/src/theme/index.ts               |  12 +-
+ 4 files changed, 406 insertions(+), 9 deletions(-)
+ create mode 100644 packages/tui/src/theme/assets/v2/sarness.json
+
+diff --git a/packages/tui/src/component/dialog-config.tsx b/packages/tui/src/component/dialog-config.tsx
+index f2e3f28..498c06b 100644
+--- a/packages/tui/src/component/dialog-config.tsx
++++ b/packages/tui/src/component/dialog-config.tsx
+@@ -23,7 +23,7 @@ export const settings: Setting[] = [
+     title: "Theme",
+     category: "Appearance",
+     path: ["theme", "name"],
+-    default: "opencode",
++    default: "sarness",
+     keywords: ["color scheme", "colors"],
+   },
+   {
+diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
+index ed568e6..f6f5629 100644
+--- a/packages/tui/src/context/theme.tsx
++++ b/packages/tui/src/context/theme.tsx
+@@ -113,7 +113,7 @@ type ThemeContextValue = {
+ const [store, setStore] = createStore<State>({
+   mode: "dark",
+   lock: undefined,
+-  active: "opencode",
++  active: "sarness",
+   ready: false,
+ })
+ const [themeSources, setThemeSources] = createSignal(allThemes())
+@@ -136,7 +136,7 @@ const themeContext = createSimpleContext({
+         const mode = lock ?? renderer.themeMode ?? props.mode
+         draft.mode = mode
+         draft.lock = lock
+-        draft.active = config.theme?.name ?? "opencode"
++        draft.active = config.theme?.name ?? "sarness"
+         draft.ready = false
+       }),
+     )
+@@ -163,7 +163,7 @@ const themeContext = createSimpleContext({
+         .then((themes) => {
+           setCustomThemes(themes)
+         })
+-        .catch(() => setStore("active", "opencode"))
++        .catch(() => setStore("active", "sarness"))
+     }
+ 
+     onMount(() => {
+@@ -297,14 +297,14 @@ const themeContext = createSimpleContext({
+     const initStarted = performance.now()
+     const selected = createMemo(() => {
+       const sources = available()
+-      const name = sources[store.active] ? store.active : "opencode"
++      const name = sources[store.active] ? store.active : "sarness"
+       try {
+         return loadTheme(sources[name], name, store.mode)
+       } catch (error) {
+-        if (name === "opencode") throw error
++        if (name === "sarness") throw error
+         themeErrors.emit(name, error)
+-        setStore("active", "opencode")
+-        return loadTheme(sources.opencode, "opencode", store.mode)
++        setStore("active", "sarness")
++        return loadTheme(sources.sarness, "sarness", store.mode)
+       }
+     })
+     const modes = () => selected().modes
+diff --git a/packages/tui/src/theme/assets/v2/sarness.json b/packages/tui/src/theme/assets/v2/sarness.json
+new file mode 100644
+index 0000000..343385e
+--- /dev/null
++++ b/packages/tui/src/theme/assets/v2/sarness.json
+@@ -0,0 +1,387 @@
++{
++  "$schema": "https://opencode.ai/theme.json",
++  "base": {
++    "categorical": [
++      "blue",
++      "cyan",
++      "orange",
++      "red",
++      "gray"
++    ],
++    "text": {
++      "base": "$hue.neutral.200",
++      "muted": "$hue.neutral.400",
++      "action": {
++        "primary": {
++          "base": "$text.base",
++          "$disabled": "$hue.neutral.400",
++          "$focused": "$hue.neutral.800",
++          "$selected": "$hue.interactive.200"
++        },
++        "secondary": {
++          "base": "$text.muted",
++          "$hovered": "$text.base"
++        },
++        "destructive": {
++          "base": "$hue.neutral.800",
++          "$disabled": "$hue.neutral.400"
++        }
++      },
++      "formfield": {
++        "base": "$hue.neutral.200",
++        "$hovered": "$hue.interactive.200",
++        "$focused": "$hue.interactive.200",
++        "$pressed": "$hue.interactive.200",
++        "$disabled": "$hue.neutral.400",
++        "$selected": "$hue.interactive.200"
++      },
++      "feedback": {
++        "error": {
++          "base": "$hue.red.200"
++        },
++        "warning": {
++          "base": "#f5a742"
++        },
++        "success": {
++          "base": "$hue.green.200"
++        },
++        "info": {
++          "base": "$hue.cyan.200"
++        }
++      }
++    },
++    "background": {
++      "base": "$hue.neutral.800",
++      "raised": {
++        "base": "$hue.neutral.700",
++        "high": "$hue.neutral.600",
++        "max": "$hue.neutral.500"
++      },
++      "action": {
++        "primary": {
++          "base": "transparent",
++          "$hovered": "$hue.neutral.700",
++          "$focused": "$hue.interactive.200",
++          "$selected": "transparent"
++        },
++        "secondary": {
++          "base": "transparent"
++        },
++        "destructive": {
++          "base": "$hue.red.200"
++        }
++      },
++      "formfield": {
++        "base": "$background.base"
++      },
++      "feedback": {
++        "error": {
++          "base": "$background.base"
++        },
++        "warning": {
++          "base": "$background.base"
++        },
++        "success": {
++          "base": "$background.base"
++        },
++        "info": {
++          "base": "$background.base"
++        }
++      }
++    },
++    "border": {
++      "base": "#333333"
++    },
++    "scrollbar": {
++      "base": "#4a4a4a"
++    },
++    "diff": {
++      "text": {
++        "added": "#4fd6be",
++        "removed": "#c53b53",
++        "context": "#828bb8",
++        "hunkHeader": "#828bb8"
++      },
++      "background": {
++        "added": "#20303b",
++        "removed": "#37222c",
++        "context": "$hue.neutral.700"
++      },
++      "highlight": {
++        "added": "#b8db87",
++        "removed": "#e26a75"
++      },
++      "lineNumber": {
++        "text": "#8f8f8f",
++        "background": {
++          "added": "#1b2b34",
++          "removed": "#2d1f26"
++        }
++      }
++    },
++    "syntax": {
++      "comment": "$hue.neutral.400",
++      "keyword": "$hue.accent.200",
++      "function": "$hue.interactive.200",
++      "variable": "$hue.red.200",
++      "string": "$hue.green.200",
++      "number": "#f5a742",
++      "type": "#e5c07b",
++      "operator": "$hue.cyan.200",
++      "punctuation": "$hue.neutral.200"
++    },
++    "markdown": {
++      "text": "$hue.neutral.200",
++      "heading": "$hue.accent.200",
++      "link": "$hue.interactive.200",
++      "linkText": "$hue.cyan.200",
++      "code": "$hue.green.200",
++      "blockQuote": "#e5c07b",
++      "emphasis": "#e5c07b",
++      "strong": "#f5a742",
++      "horizontalRule": "$hue.neutral.400",
++      "listItem": "$hue.interactive.200",
++      "listEnumeration": "$hue.cyan.200",
++      "image": "$hue.interactive.200",
++      "imageText": "$hue.cyan.200",
++      "codeBlock": "$hue.neutral.200"
++    },
++    "@dialog": {
++      "background": {
++        "base": "$background.raised.base",
++        "action": {
++          "primary": {
++            "$hovered": "$background.raised.high"
++          }
++        }
++      }
++    }
++  },
++  "light": {
++    "hue": {
++      "gray": {
++        "100": "#000000",
++        "200": "#1a1a1a",
++        "300": "#4e4e4e",
++        "400": "#8a8a8a",
++        "500": "#bebebe",
++        "600": "#f5f5f5",
++        "700": "#fafafa",
++        "800": "#ffffff",
++        "900": "#ffffff"
++      },
++      "red": {
++        "100": "#c20f26",
++        "200": "#d1383d",
++        "300": "#e05352",
++        "400": "#ee6b68",
++        "500": "#fc837d",
++        "600": "#fda19b",
++        "700": "#fcbeb9",
++        "800": "#fed8d5",
++        "900": "#fff2f0"
++      },
++      "orange": {
++        "100": "#c7811e",
++        "200": "#d68c27",
++        "300": "#df9a44",
++        "400": "#e8a85c",
++        "500": "#f1b671",
++        "600": "#fac386",
++        "700": "#fcd4a8",
++        "800": "#fee3c7",
++        "900": "#fef3e7"
++      },
++      "green": {
++        "100": "#1f8c44",
++        "200": "#3d9a57",
++        "300": "#55a96a",
++        "400": "#6cb77c",
++        "500": "#81c68f",
++        "600": "#96d5a3",
++        "700": "#ace4b6",
++        "800": "#c1f3ca",
++        "900": "#e1fee6"
++      },
++      "cyan": {
++        "100": "#077786",
++        "200": "#318795",
++        "300": "#4c97a4",
++        "400": "#64a8b4",
++        "500": "#7bb8c4",
++        "600": "#92c9d4",
++        "700": "#a8dbe4",
++        "800": "#bfecf4",
++        "900": "#e3fafe"
++      },
++      "blue": {
++        "100": "#226bcc",
++        "200": "#3b7dd8",
++        "300": "#518ee4",
++        "400": "#67a0f0",
++        "500": "#7db1fc",
++        "600": "#9cc3fa",
++        "700": "#b7d4fd",
++        "800": "#d4e5fd",
++        "900": "#f0f6fe"
++      },
++      "purple": {
++        "100": "#226bcc",
++        "200": "#3b7dd8",
++        "300": "#518ee4",
++        "400": "#67a0f0",
++        "500": "#7db1fc",
++        "600": "#9cc3fa",
++        "700": "#b7d4fd",
++        "800": "#d4e5fd",
++        "900": "#f0f6fe"
++      },
++      "accent": "$hue.blue",
++      "interactive": "$hue.blue",
++      "neutral": "$hue.gray"
++    },
++    "categorical": [
++      "purple",
++      "orange",
++      "green",
++      "blue",
++      "red"
++    ],
++    "text": {
++      "action": {
++        "primary": {
++          "$focused": "$hue.neutral.900"
++        },
++        "destructive": {
++          "base": "$hue.neutral.900"
++        }
++      },
++      "feedback": {
++        "warning": {
++          "base": "$hue.accent.200"
++        }
++      }
++    },
++    "border": {
++      "base": "#b8b8b8"
++    },
++    "scrollbar": {
++      "base": "#a0a0a0"
++    },
++    "diff": {
++      "text": {
++        "added": "#1e725c",
++        "context": "#7086b5",
++        "hunkHeader": "#7086b5"
++      },
++      "background": {
++        "added": "#d5e5d5",
++        "removed": "#f7d8db"
++      },
++      "highlight": {
++        "added": "#4db380",
++        "removed": "#f52a65"
++      },
++      "lineNumber": {
++        "text": "#595959",
++        "background": {
++          "added": "#c5d5c5",
++          "removed": "#e7c8cb"
++        }
++      }
++    },
++    "syntax": {
++      "number": "$hue.accent.200",
++      "type": "#b0851f"
++    },
++    "markdown": {
++      "blockQuote": "#b0851f",
++      "emphasis": "#b0851f",
++      "strong": "$hue.accent.200"
++    }
++  },
++  "dark": {
++    "hue": {
++      "gray": {
++        "100": "#ffffff",
++        "200": "#ededed",
++        "300": "#bdbdbd",
++        "400": "#8c8c8c",
++        "500": "#4d4d4d",
++        "600": "#1f1f1f",
++        "700": "#121212",
++        "800": "#000000",
++        "900": "#000000"
++      },
++      "red": {
++        "100": "#fd7e87",
++        "200": "#e06c75",
++        "300": "#c35a63",
++        "400": "#a74952",
++        "500": "#8c3941",
++        "600": "#722931",
++        "700": "#591921",
++        "800": "#410a13",
++        "900": "#280207"
++      },
++      "orange": {
++        "100": "#fddac5",
++        "200": "#fab283",
++        "300": "#d8976c",
++        "400": "#b67c56",
++        "500": "#966341",
++        "600": "#774a2c",
++        "700": "#593319",
++        "800": "#3d1d06",
++        "900": "#1f0b01"
++      },
++      "green": {
++        "100": "#96f7a7",
++        "200": "#7fd88f",
++        "300": "#68b977",
++        "400": "#539c61",
++        "500": "#3d7f4b",
++        "600": "#296336",
++        "700": "#144922",
++        "800": "#00300f",
++        "900": "#011705"
++      },
++      "cyan": {
++        "100": "#68d0dd",
++        "200": "#56b6c2",
++        "300": "#449da7",
++        "400": "#33848e",
++        "500": "#226c75",
++        "600": "#0f555d",
++        "700": "#093e44",
++        "800": "#02292e",
++        "900": "#001518"
++      },
++      "blue": {
++        "100": "#a9c9ff",
++        "200": "#7aaaf5",
++        "300": "#5b91e8",
++        "400": "#4677c9",
++        "500": "#365fa6",
++        "600": "#284a84",
++        "700": "#1b3563",
++        "800": "#0f2243",
++        "900": "#071125"
++      },
++      "purple": {
++        "100": "#a9c9ff",
++        "200": "#7aaaf5",
++        "300": "#5b91e8",
++        "400": "#4677c9",
++        "500": "#365fa6",
++        "600": "#284a84",
++        "700": "#1b3563",
++        "800": "#0f2243",
++        "900": "#071125"
++      },
++      "accent": "$hue.blue",
++      "interactive": "$hue.blue",
++      "neutral": "$hue.gray"
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/packages/tui/src/theme/index.ts b/packages/tui/src/theme/index.ts
+index bda19d6..c4d687f 100644
+--- a/packages/tui/src/theme/index.ts
++++ b/packages/tui/src/theme/index.ts
+@@ -3,6 +3,7 @@ import { resolveThemeColors } from "./resolve"
+ import { DEFAULT_THEMES, type Theme, type ThemeV1Json } from "./v1"
+ import opencode from "./assets/v2/opencode.json" with { type: "json" }
+ import opencode2 from "./assets/v2/opencode2.json" with { type: "json" }
++import sarness from "./assets/v2/sarness.json" with { type: "json" }
+ 
+ export { DEFAULT_THEMES, type Theme, type ThemeV1Json } from "./v1"
+ 
+@@ -24,6 +25,13 @@ export function getOpenCodeTheme() {
+   return document
+ }
+ 
++let sarnessTheme: ThemeDocument | undefined
++
++export function getSarnessTheme() {
++  sarnessTheme ??= parseThemeDocument(sarness, "sarness")
++  return sarnessTheme
++}
++
+ let opencode2Theme: ThemeDocument | undefined
+ 
+ // Temporary theme for the "new-designs" experiment. It is not part of allThemes(), so only the
+@@ -38,11 +46,13 @@ function listThemes(): Record<string, ThemeDocumentSource> {
+   const themes: Record<string, ThemeDocumentSource> = {
+     ...DEFAULT_THEMES,
+     opencode: getOpenCodeTheme(),
++    // SARNESS: the default theme (black, white, grey metadata, blue accents).
++    sarness: getSarnessTheme(),
+     ...customThemes,
+   }
+   return {
+     ...themes,
+-    system: systemTheme ?? themes.system ?? themes.opencode,
++    system: systemTheme ?? themes.system ?? themes.sarness,
+   }
+ }
+ 
+-- 
+2.53.0
+

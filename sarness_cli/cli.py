@@ -20,6 +20,7 @@ from .menu import MenuItem, TerminalMenu, select_model
 from .modelinfo import cache_models, load_cached_models, record_probe
 from .openai_bridge import launch_opencode
 from .repl import Repl
+from . import tui
 from .startup import StartupUI, ensure_ready
 from .runtime import ModelError, Prepared, build_run_config, describe_model, prepare_model, resolve_model
 from .setup import doctor, run_setup
@@ -27,7 +28,8 @@ from .tools import Workspace
 from .ui import Console, banner_bypass
 from .policy import EffectivePermissions
 
-COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet", "opencode", "code"}
+COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet",
+            "opencode", "code", "native", "tui"}
 
 
 def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
@@ -85,12 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
     up = sp.add_parser("upgrade", parents=[parents], help="Reinstall from the recorded source directory"); up.add_argument("--pull", action="store_true")
     cab = sp.add_parser("cabinet", parents=[parents], help="Inspect server memory, view and load/unload models")
     cab.add_argument("subcommand", nargs="*", help="status, unload, release, load <id>, refresh")
-    for name, text in (("code", "Coding agent on the OpenCode runtime, inference on Sarness Engine"),
+    nat = sp.add_parser("native", parents=[parents], help="The Python runtime (REPL, or one task): the pre-0.4 interface")
+    nat.add_argument("prompt", nargs="*", help="Run this task non-interactively instead of opening the REPL")
+    tu = sp.add_parser("tui", parents=[parents], help="Install or inspect the Sarness terminal")
+    tu.add_argument("action", nargs="?", choices=["status", "install", "path", "migrate"], default="status",
+                    help="status, install (build the pinned fork), path, migrate (copy this project's OpenCode sessions)")
+    tu.add_argument("--keep-build", action="store_true", help="Keep the 3+ GB build tree for faster rebuilds")
+    for name, text in (("code", "The Sarness terminal (coding agent), inference on Sarness Engine"),
                        ("opencode", "Alias of 'code'")):
         oc = sp.add_parser(name, parents=[parents], help=text)
         oc.add_argument("task", nargs="*", help="Run this task non-interactively instead of opening the TUI")
-        oc.add_argument("--session", dest="oc_session", help="OpenCode session ID to continue")
-        oc.add_argument("--continue", dest="oc_continue", action="store_true", help="Continue the last OpenCode session")
+        oc.add_argument("--session", dest="oc_session", help="Sarness terminal session ID to continue")
+        oc.add_argument("--continue", dest="oc_continue", action="store_true", help="Continue the last Sarness terminal session")
     return parser
 
 
@@ -633,9 +641,9 @@ def cmd_opencode(a: argparse.Namespace) -> int:
         effort = settings.get("effort") or "medium"
         mode = permissions.mode
         print(f"SARNESS  {selected.get('name') or selected['ref']} · {effort} effort · {name} · {mode.upper()}"
-              f" · ctx {status.get('ctx') or '?'} · runtime OpenCode", file=sys.stderr)
+              f" · ctx {status.get('ctx') or '?'}", file=sys.stderr)
         if mode == "bypass":
-            print("BYPASS: OpenCode auto-approves every tool call (--auto). OS permissions and engine auth still apply.",
+            print("BYPASS: every tool call is auto-approved. OS permissions and engine auth still apply.",
                   file=sys.stderr)
         args = None
         extra = (["--session", a.oc_session] if getattr(a, "oc_session", None) else []) + \
@@ -645,11 +653,55 @@ def cmd_opencode(a: argparse.Namespace) -> int:
             args = ["run", "-m", f"sarness/{selected['ref']}", *extra, task]
         try:
             return launch_opencode(engine, models, selected["ref"], workspace, mode=mode, effort=effort, live=status,
-                                   args=args, tui_args=extra if not task else None)
+                                   args=args, tui_args=extra if not task else None, server=name)
         except (RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            raise ConfigError(f"Cannot launch OpenCode: {exc}") from exc
+            raise ConfigError(f"Cannot start the Sarness terminal: {exc}") from exc
     finally:
         conn.close()
+
+
+def tui_ready() -> bool:
+    if tui.find_binary():
+        return True
+    print("The Sarness terminal is not installed yet ('sarness tui install'); starting the Python runtime.",
+          file=sys.stderr)
+    return False
+
+
+def cmd_tui(a: argparse.Namespace) -> int:
+    if a.action == "install":
+        return tui.install(keep_build=a.keep_build)
+    found = tui.find_binary()
+    if a.action == "path":
+        if found:
+            say(str(found))
+        return 0 if found else 1
+    if not found:
+        say(f"Sarness terminal: not installed (install root {tui.install_root()}). Run 'sarness tui install'.")
+        return 1
+    if a.action == "migrate":
+        return migrate_sessions(found)
+    say(f"Sarness terminal: {tui.installed_version(found)}\n  binary  {found}\n  data    ~/.local/share/sarness-code "
+        "(separate from any OpenCode install)")
+    return 0
+
+
+def migrate_sessions(binary) -> int:
+    upstream = tui.upstream_opencode()
+    if not upstream:
+        say("No OpenCode installation found, so there are no OpenCode sessions to copy.")
+        return 0
+    here = Path.cwd()
+    try:
+        done = tui.migrate_sessions(here, binary, upstream)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        say(f"Session migration failed: {exc}")
+        return 1
+    say(f"OpenCode sessions for {here}: {len(done['imported'])} copied, {len(done['existing'])} already present, "
+        f"{len(done['failed'])} failed. OpenCode was only asked to list and export them.")
+    for sid in done["imported"]:
+        say(f"  sarness code --session {sid}")
+    return 1 if done["failed"] else 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -658,7 +710,7 @@ def main(argv: list[str] | None = None) -> None:
     # positionals ("resume ID --mode auto 'text'"), then rejects the text. Gather such words into the prompt.
     a, extra = parser.parse_known_args(argv)
     if extra:
-        target = {"resume": "prompt", "run": "prompt", "code": "task", "opencode": "task"}.get(a.command or "")
+        target = {"resume": "prompt", "run": "prompt", "native": "prompt", "code": "task", "opencode": "task"}.get(a.command or "")
         if not target or any(x.startswith("-") for x in extra):
             parser.error("unrecognized arguments: " + " ".join(extra))
         setattr(a, target, list(getattr(a, target, None) or []) + extra)
@@ -685,6 +737,10 @@ def main(argv: list[str] | None = None) -> None:
             code = cmd_cabinet(a)
         elif cmd in ("opencode", "code"):
             code = cmd_opencode(a)
+        elif cmd == "native":
+            code = start_session(a, " ".join(a.prompt).strip() or None)
+        elif cmd == "tui":
+            code = cmd_tui(a)
         elif cmd == "run":
             code = start_session(a, " ".join(a.prompt).strip() or None)
         elif cmd == "resume":
@@ -692,8 +748,8 @@ def main(argv: list[str] | None = None) -> None:
             code = handle_resume(a.session, a, prompt=prompt)
         elif getattr(a, "resume", None) is not None:
             code = handle_resume(a.resume, a, prompt=a.prompt_opt)
-        elif (load_config().get("settings", {}).get("runtime") == "opencode" and not a.continue_last
-              and not getattr(a, "prompt_opt", None)):
+        elif (load_config().get("settings", {}).get("runtime", DEFAULTS["runtime"]) in ("tui", "opencode")
+              and not a.continue_last and not getattr(a, "prompt_opt", None) and tui_ready()):
             code = cmd_opencode(a)
         else:
             resume_id = None

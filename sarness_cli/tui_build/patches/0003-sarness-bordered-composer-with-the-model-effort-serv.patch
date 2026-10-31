@@ -1,0 +1,869 @@
+From 2f1a14521b1006e78ec860268e28e858bb473531 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 13:52:57 +1100
+Subject: [PATCH 3/6] sarness: bordered composer with the
+ model/effort/server/permission line, SARNESS wordmark
+
+- composer: full-width rules above and below, a marker, no filled panel
+- persistent info line under it: model, effort, server, permission mode (agent muted)
+- home: wordmark top-left, composer at the bottom; exit screen and run splash use the Sarness mark
+- the launch effort starts each new session until the user picks a variant
+---
+ packages/tui/src/component/logo.tsx           |  31 +-
+ packages/tui/src/component/prompt/index.tsx   | 374 ++++++++----------
+ .../tui/src/component/prompt/metadata.tsx     |  65 ++-
+ packages/tui/src/context/local.tsx            |  17 +-
+ .../tui/src/feature-plugins/home/footer.tsx   |   5 +-
+ packages/tui/src/logo.ts                      |   9 +
+ packages/tui/src/mini/splash.ts               |   6 +-
+ packages/tui/src/routes/home.tsx              |  31 +-
+ packages/tui/src/sarness.ts                   |  55 +++
+ packages/tui/src/util/presentation.ts         |  11 +-
+ 10 files changed, 347 insertions(+), 257 deletions(-)
+ create mode 100644 packages/tui/src/sarness.ts
+
+diff --git a/packages/tui/src/component/logo.tsx b/packages/tui/src/component/logo.tsx
+index 2c3abc3..4d3b6de 100644
+--- a/packages/tui/src/component/logo.tsx
++++ b/packages/tui/src/component/logo.tsx
+@@ -3,7 +3,7 @@ import { For, type JSX } from "solid-js"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { useTheme } from "../context/theme"
+ import { tint } from "../theme/color"
+-import { go, logo } from "../logo"
++import { sarness, sarnessSmall } from "../logo"
+ 
+ export function Logo() {
+   const theme = useTheme()
+@@ -49,30 +49,19 @@ export function Logo() {
+     })
+   }
+ 
++  // SARNESS: compact wordmark; plain text on small terminals, nothing when there is no room.
+   return (
+     <box>
+-      {dimensions().height < 12 ? null : dimensions().width < 22 ? (
+-        <For each={go.right.slice(1)}>
+-          {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
+-        </For>
+-      ) : dimensions().width < 44 ? (
+-        <>
+-          <For each={logo.left.slice(1)}>
+-            {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}
+-          </For>
+-          <For each={logo.right}>
+-            {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
+-          </For>
+-        </>
+-      ) : (
+-        <For each={logo.left}>
+-          {(line, index) => (
+-            <box flexDirection="row" gap={1}>
+-              <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>
+-              <box flexDirection="row">{renderLine(logo.right[index()], theme.text.base, true)}</box>
+-            </box>
++      {dimensions().height < 12 ? null : dimensions().width < 40 ? (
++        <For each={sarnessSmall}>
++          {(line) => (
++            <text fg={theme.text.base} attributes={TextAttributes.BOLD} selectable={false}>
++              {line}
++            </text>
+           )}
+         </For>
++      ) : (
++        <For each={sarness}>{(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}</For>
+       )}
+     </box>
+   )
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index a9f699c..b8198b6 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -13,7 +13,7 @@ import { useLocal } from "../../context/local"
+ import { useTheme, useThemes } from "../../context/theme"
+ import { tint } from "../../theme/color"
+ import { createAnimatable, tween } from "../../ui/animation"
+-import { EmptyBorder, SplitBorder } from "../../ui/border"
++import { EmptyBorder } from "../../ui/border"
+ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+ import { useClipboard } from "../../context/clipboard"
+ import { Spinner } from "../spinner"
+@@ -69,7 +69,7 @@ import { useDirectoryRecents } from "../../prompt/directory-recents"
+ import { directoryRecentValue } from "../../prompt/directory-completion"
+ import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
+ import { truncateFilePath } from "../../ui/file-path"
+-import { PromptMetadataRow } from "./metadata"
++import { SarnessInfoLine } from "./metadata"
+ 
+ export type PromptProps = {
+   sessionID?: string
+@@ -1573,14 +1573,6 @@ export function Prompt(props: PromptProps) {
+   const animateMetadata = !revealedPromptMetadata.has(local)
+   const metadataAnimationsEnabled = () => animationsEnabled() && animateMetadata
+   const agentMetaAlpha = createFadeIn(() => !!agentLabel(), metadataAnimationsEnabled)
+-  const modelMetaAlpha = createFadeIn(
+-    () => !!promptDisplay().agentLabel && store.mode === "normal",
+-    metadataAnimationsEnabled,
+-  )
+-  const variantMetaAlpha = createFadeIn(
+-    () => !!promptDisplay().agentLabel && store.mode === "normal" && !!promptDisplay().variant,
+-    metadataAnimationsEnabled,
+-  )
+   createEffect(() => {
+     if (agentLabel()) revealedPromptMetadata.add(local)
+   })
+@@ -1652,226 +1644,190 @@ export function Prompt(props: PromptProps) {
+   })
+   const maxHeight = createMemo(() => Math.max(6, Math.floor(dimensions().height / 3)))
+ 
+-  const promptBg = createMemo(() => theme.decrease(theme.background.raised.base))
+ 
+   return (
+     <>
+       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
++        {/* SARNESS: composer = full-width rules above and below the input, a ❯ marker, no filled panel. */}
+         <box
+           width="100%"
+-          border={["left"]}
+-          borderColor={borderHighlight()}
+-          customBorderChars={{
+-            ...SplitBorder.customBorderChars,
+-            bottomLeft: "╹",
+-          }}
++          border={["top", "bottom"]}
++          borderColor={theme.border.base}
++          customBorderChars={{ ...EmptyBorder, horizontal: "─" }}
+         >
+-          <box
+-            paddingLeft={dimensions().width < 44 ? 1 : 2}
+-            paddingRight={dimensions().width < 44 ? 1 : 2}
+-            paddingTop={1}
+-            flexShrink={0}
+-            backgroundColor={promptBg()}
+-            flexGrow={1}
+-            width="100%"
+-          >
+-            <Show when={config.prompt?.image_preview && visibleImageAttachments().length > 0}>
+-              <box
+-                width="100%"
+-                height={imagePreviewHeight() + 1}
+-                flexDirection="row"
+-                flexShrink={0}
+-                justifyContent="flex-start"
+-                gap={1}
+-                paddingBottom={1}
+-              >
+-                <For each={visibleImageAttachments()}>
+-                  {(file, index) => {
+-                    const [failed, setFailed] = createSignal(false)
+-                    return (
++          <box flexDirection="row" width="100%" flexShrink={0}>
++            <box flexShrink={0} width={2}>
++              <text fg={store.mode === "shell" ? theme.text.feedback.warning.base : borderHighlight()}>{store.mode === "shell" ? "!" : "❯"}</text>
++            </box>
++            <box flexGrow={1} flexShrink={1} minWidth={0}>
++                <Show when={config.prompt?.image_preview && visibleImageAttachments().length > 0}>
++                  <box
++                    width="100%"
++                    height={imagePreviewHeight() + 1}
++                    flexDirection="row"
++                    flexShrink={0}
++                    justifyContent="flex-start"
++                    gap={1}
++                    paddingBottom={1}
++                  >
++                    <For each={visibleImageAttachments()}>
++                      {(file, index) => {
++                        const [failed, setFailed] = createSignal(false)
++                        return (
++                          <box
++                            width={imagePreviewWidth()}
++                            height={imagePreviewHeight()}
++                            flexBasis={imagePreviewWidth()}
++                            flexShrink={1}
++                            onMouseUp={(event: MouseEvent) => {
++                              if (event.button !== 0) return
++                              event.stopPropagation()
++                              openImagePreview(index())
++                            }}
++                          >
++                            <Show
++                              when={!failed()}
++                              fallback={
++                                <box width="100%" height="100%" alignItems="center" justifyContent="center">
++                                  <text fg={theme.text.muted}>No preview</text>
++                                </box>
++                              }
++                            >
++                              <image
++                                id={`prompt-image-preview-${index()}`}
++                                source={file.uri}
++                                fit="cover"
++                                protocol="auto"
++                                width="100%"
++                                height="100%"
++                                onError={() => setFailed(true)}
++                              />
++                            </Show>
++                          </box>
++                        )
++                      }}
++                    </For>
++                    <Show when={imageAttachments().length > visibleImageAttachments().length}>
+                       <box
+-                        width={imagePreviewWidth()}
++                        width={8}
+                         height={imagePreviewHeight()}
+-                        flexBasis={imagePreviewWidth()}
++                        flexBasis={8}
+                         flexShrink={1}
++                        alignItems="center"
++                        justifyContent="center"
+                         onMouseUp={(event: MouseEvent) => {
+                           if (event.button !== 0) return
+                           event.stopPropagation()
+-                          openImagePreview(index())
++                          openImagePreview(visibleImageAttachments().length)
+                         }}
+                       >
+-                        <Show
+-                          when={!failed()}
+-                          fallback={
+-                            <box width="100%" height="100%" alignItems="center" justifyContent="center">
+-                              <text fg={theme.text.muted}>No preview</text>
+-                            </box>
+-                          }
+-                        >
+-                          <image
+-                            id={`prompt-image-preview-${index()}`}
+-                            source={file.uri}
+-                            fit="cover"
+-                            protocol="auto"
+-                            width="100%"
+-                            height="100%"
+-                            onError={() => setFailed(true)}
+-                          />
+-                        </Show>
++                        <text fg={theme.text.muted} wrapMode="none" truncate>
++                          +{imageAttachments().length - visibleImageAttachments().length} more
++                        </text>
+                       </box>
+-                    )
+-                  }}
+-                </For>
+-                <Show when={imageAttachments().length > visibleImageAttachments().length}>
+-                  <box
+-                    width={8}
+-                    height={imagePreviewHeight()}
+-                    flexBasis={8}
+-                    flexShrink={1}
+-                    alignItems="center"
+-                    justifyContent="center"
+-                    onMouseUp={(event: MouseEvent) => {
+-                      if (event.button !== 0) return
+-                      event.stopPropagation()
+-                      openImagePreview(visibleImageAttachments().length)
+-                    }}
+-                  >
+-                    <text fg={theme.text.muted} wrapMode="none" truncate>
+-                      +{imageAttachments().length - visibleImageAttachments().length} more
+-                    </text>
++                    </Show>
+                   </box>
+                 </Show>
+-              </box>
+-            </Show>
+-            <textarea
+-              width="100%"
+-              placeholder={placeholderText()}
+-              placeholderColor={theme.text.muted}
+-              textColor={muted() ? theme.text.muted : theme.text.base}
+-              focusedTextColor={muted() ? theme.text.muted : theme.text.base}
+-              minHeight={1}
+-              maxHeight={maxHeight()}
+-              cursorStyle={config.cursor}
+-              onContentChange={() => {
+-                const value = input.plainText
+-                setStore("prompt", "text", value)
+-                auto()?.onInput(value)
+-                syncExtmarksWithPromptParts()
+-                setCursorVersion((value) => value + 1)
+-              }}
+-              onCursorChange={() => setCursorVersion((value) => value + 1)}
+-              onKeyDown={(e: { preventDefault(): void }) => {
+-                if (disabled()) {
+-                  e.preventDefault()
+-                  return
+-                }
+-              }}
+-              onSubmit={() => {
+-                if (disabled()) return
+-                // IME: double-defer so the last composed character (e.g. Korean
+-                // hangul) is flushed to plainText before we read it for submission.
+-                setTimeout(() => setTimeout(() => submit(), 0), 0)
+-              }}
+-              onPaste={(event: PasteEvent) => {
+-                if (disabled()) {
+-                  event.preventDefault()
+-                  return
+-                }
+-
+-                // Normalize line endings at the boundary
+-                // Windows ConPTY/Terminal often sends CR-only newlines in bracketed paste
+-                // Replace CRLF first, then any remaining CR
+-                const normalizedText = decodePasteBytes(event.bytes).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+-
+-                // Windows Terminal <1.25 can surface image-only clipboard as an
+-                // empty bracketed paste. Windows Terminal 1.25+ does not.
+-                if (event.bytes.byteLength === 0) {
+-                  keymap.dispatch("prompt.paste")
+-                  return
+-                }
+-
+-                // Once we cross an async boundary below, the terminal may perform its
+-                // default paste unless we suppress it first and handle insertion ourselves.
+-                event.preventDefault()
+-
+-                void enqueuePaste((changed) => pasteInputText(normalizedText, changed))
+-              }}
+-              ref={(r: TextareaRenderable) => {
+-                input = r
+-                Object.assign(r, {
+-                  getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.pasted),
+-                })
+-                setInputTarget(r)
+-                if (promptPartTypeId === 0) {
+-                  promptPartTypeId = input.extmarks.registerType("prompt-part")
+-                }
+-                props.ref?.(ref)
+-                setTimeout(() => {
+-                  // setTimeout is a workaround and needs to be addressed properly
+-                  if (!input || input.isDestroyed) return
+-                  input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
+-                  if (config.cursor) input.cursorStyle = config.cursor
+-                }, 0)
+-              }}
+-              onMouseDown={(r: MouseEvent) => {
+-                if (disabled()) {
+-                  r.preventDefault()
+-                  return
+-                }
+-                if (r.button !== 0) return
+-                r.target?.focus()
+-                const extmark = input.extmarks
+-                  .getAtOffset(input.cursorOffset)
+-                  .find((item) => store.extmarkToPart.get(item.id)?.type === "pasted")
+-                if (!extmark || !expandPastedText(extmark.id)) return
+-                r.preventDefault()
+-                r.stopPropagation()
+-              }}
+-              focusedBackgroundColor="transparent"
+-              cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
+-              syntaxStyle={syntax()}
+-            />
+-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
+-              <PromptMetadataRow
+-                mode={store.mode}
+-                agent={agentLabel()}
+-                auto={local.permission.mode === "autoaccept"}
+-                model={promptDisplay().modelLabel}
+-                provider={promptDisplay().providerLabel}
+-                variant={promptDisplay().variant}
+-                muted={!!muted()}
+-                highlight={highlight()}
+-                agentAlpha={agentMetaAlpha()}
+-                modelAlpha={modelMetaAlpha()}
+-                variantAlpha={variantMetaAlpha()}
+-              />
++                <textarea
++                  width="100%"
++                  placeholder={placeholderText()}
++                  placeholderColor={theme.text.muted}
++                  textColor={muted() ? theme.text.muted : theme.text.base}
++                  focusedTextColor={muted() ? theme.text.muted : theme.text.base}
++                  minHeight={1}
++                  maxHeight={maxHeight()}
++                  cursorStyle={config.cursor}
++                  onContentChange={() => {
++                    const value = input.plainText
++                    setStore("prompt", "text", value)
++                    auto()?.onInput(value)
++                    syncExtmarksWithPromptParts()
++                    setCursorVersion((value) => value + 1)
++                  }}
++                  onCursorChange={() => setCursorVersion((value) => value + 1)}
++                  onKeyDown={(e: { preventDefault(): void }) => {
++                    if (disabled()) {
++                      e.preventDefault()
++                      return
++                    }
++                  }}
++                  onSubmit={() => {
++                    if (disabled()) return
++                    // IME: double-defer so the last composed character (e.g. Korean
++                    // hangul) is flushed to plainText before we read it for submission.
++                    setTimeout(() => setTimeout(() => submit(), 0), 0)
++                  }}
++                  onPaste={(event: PasteEvent) => {
++                    if (disabled()) {
++                      event.preventDefault()
++                      return
++                    }
++
++                    // Normalize line endings at the boundary
++                    // Windows ConPTY/Terminal often sends CR-only newlines in bracketed paste
++                    // Replace CRLF first, then any remaining CR
++                    const normalizedText = decodePasteBytes(event.bytes).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
++
++                    // Windows Terminal <1.25 can surface image-only clipboard as an
++                    // empty bracketed paste. Windows Terminal 1.25+ does not.
++                    if (event.bytes.byteLength === 0) {
++                      keymap.dispatch("prompt.paste")
++                      return
++                    }
++
++                    // Once we cross an async boundary below, the terminal may perform its
++                    // default paste unless we suppress it first and handle insertion ourselves.
++                    event.preventDefault()
++
++                    void enqueuePaste((changed) => pasteInputText(normalizedText, changed))
++                  }}
++                  ref={(r: TextareaRenderable) => {
++                    input = r
++                    Object.assign(r, {
++                      getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.pasted),
++                    })
++                    setInputTarget(r)
++                    if (promptPartTypeId === 0) {
++                      promptPartTypeId = input.extmarks.registerType("prompt-part")
++                    }
++                    props.ref?.(ref)
++                    setTimeout(() => {
++                      // setTimeout is a workaround and needs to be addressed properly
++                      if (!input || input.isDestroyed) return
++                      input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
++                      if (config.cursor) input.cursorStyle = config.cursor
++                    }, 0)
++                  }}
++                  onMouseDown={(r: MouseEvent) => {
++                    if (disabled()) {
++                      r.preventDefault()
++                      return
++                    }
++                    if (r.button !== 0) return
++                    r.target?.focus()
++                    const extmark = input.extmarks
++                      .getAtOffset(input.cursorOffset)
++                      .find((item) => store.extmarkToPart.get(item.id)?.type === "pasted")
++                    if (!extmark || !expandPastedText(extmark.id)) return
++                    r.preventDefault()
++                    r.stopPropagation()
++                  }}
++                  focusedBackgroundColor="transparent"
++                  cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
++                  syntaxStyle={syntax()}
++                />
+             </box>
+           </box>
+         </box>
+-        <box
+-          height={1}
+-          border={["left"]}
+-          borderColor={borderHighlight()}
+-          customBorderChars={{
+-            ...EmptyBorder,
+-            vertical: promptBg().a !== 0 ? "╹" : " ",
+-          }}
+-        >
+-          <box
+-            height={1}
+-            border={["bottom"]}
+-            borderColor={promptBg()}
+-            customBorderChars={
+-              promptBg().a !== 0
+-                ? {
+-                    ...EmptyBorder,
+-                    horizontal: "▀",
+-                  }
+-                : {
+-                    ...EmptyBorder,
+-                    horizontal: " ",
+-                  }
+-            }
++        <box flexDirection="row" flexShrink={0} paddingLeft={2} gap={1}>
++          <SarnessInfoLine
++            mode={store.mode}
++            agent={agentLabel()}
++            auto={local.permission.mode === "autoaccept"}
++            model={promptDisplay().modelLabel}
++            variant={promptDisplay().variant}
++            highlight={highlight()}
++            muted={!!muted()}
+           />
+         </box>
+         <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
+diff --git a/packages/tui/src/component/prompt/metadata.tsx b/packages/tui/src/component/prompt/metadata.tsx
+index 60c4739..12902b1 100644
+--- a/packages/tui/src/component/prompt/metadata.tsx
++++ b/packages/tui/src/component/prompt/metadata.tsx
+@@ -1,6 +1,7 @@
+ import { RGBA, TextAttributes } from "@opentui/core"
+ import { useTerminalDimensions } from "@opentui/solid"
+-import { createMemo, Show } from "solid-js"
++import { createMemo, For, Show } from "solid-js"
++import { SarnessLaunch, sarnessEffortLabel, sarnessModeLabel } from "../../sarness"
+ import { useTheme } from "../../context/theme"
+ import { Locale } from "../../util/locale"
+ import { stringWidth } from "../../util/string-width"
+@@ -144,3 +145,65 @@ function text(input: Layout) {
+     ...(input.variant ? ["·", input.variant] : []),
+   ].join(" ")
+ }
++
++// SARNESS: the persistent line under the composer: Model · Effort · Server · Permission mode.
++// Values are the live ones: model/variant from the TUI's current selection, server and mode from the
++// sarness launcher (the mode is the one the generated permission rules enforce; auto-accept shows as such).
++export function SarnessInfoLine(props: {
++  mode: "normal" | "shell"
++  agent?: string
++  auto: boolean
++  model: string
++  variant?: string
++  highlight: RGBA
++  muted: boolean
++}) {
++  const theme = useTheme()
++  const dimensions = useTerminalDimensions()
++  const permission = createMemo(() => sarnessModeLabel(SarnessLaunch.mode, props.auto))
++  const server = createMemo(() =>
++    SarnessLaunch.server ? SarnessLaunch.server.charAt(0).toUpperCase() + SarnessLaunch.server.slice(1) : undefined,
++  )
++  const layout = createMemo(() => {
++    const width = Math.max(10, dimensions().width - 8)
++    const effort = props.mode === "shell" ? "Shell" : sarnessEffortLabel(props.variant)
++    const tail = (agent: boolean, srv: boolean) =>
++      [effort, srv ? server() : undefined, permission(), agent ? props.agent?.toLowerCase() : undefined].filter(
++        (item): item is string => Boolean(item),
++      )
++    for (const [agent, srv] of [
++      [true, true],
++      [false, true],
++      [false, false],
++    ] as const) {
++      const rest = tail(agent, srv)
++      if (stringWidth([props.model, ...rest].join(" · ")) <= width) return { model: props.model, rest, agent }
++    }
++    const rest = tail(false, false)
++    const room = Math.max(9, width - stringWidth(rest.join(" · ")) - 3)
++    return { model: Locale.truncateWidth(props.model, room).replace(/\s+…$/, "…"), rest, agent: false }
++  })
++  const color = (item: string) => {
++    if (item === permission()) {
++      if (item === "BYPASS" || item === "AUTO-ACCEPT") return theme.text.feedback.warning.base
++      return theme.hue.accent[300]
++    }
++    if (layout().agent && item === props.agent?.toLowerCase()) return props.highlight
++    return theme.text.muted
++  }
++  return (
++    <box flexDirection="row" flexShrink={1} minWidth={0} height={1}>
++      <text wrapMode="none" truncate fg={props.muted ? theme.text.muted : theme.text.base}>
++        {layout().model}
++        <For each={layout().rest}>
++          {(item) => (
++            <>
++              <span style={{ fg: theme.text.muted }}>{" · "}</span>
++              <span style={{ fg: color(item) }}>{item}</span>
++            </>
++          )}
++        </For>
++      </text>
++    </box>
++  )
++}
+diff --git a/packages/tui/src/context/local.tsx b/packages/tui/src/context/local.tsx
+index d3304eb..64e49c2 100644
+--- a/packages/tui/src/context/local.tsx
++++ b/packages/tui/src/context/local.tsx
+@@ -1,7 +1,7 @@
+ import { createStore } from "solid-js/store"
+ import { dedupeWith } from "effect/Array"
+ import { createSimpleContext } from "./helper"
+-import { batch, createMemo, onCleanup } from "solid-js"
++import { batch, createMemo, createSignal, onCleanup } from "solid-js"
+ import { useEvent } from "./event"
+ import path from "path"
+ import { useTuiPaths } from "./runtime"
+@@ -155,6 +155,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+       })
+ 
+       const repository = createModelPreferenceRepository(path.join(paths.state, "model.json"))
++      // SARNESS: becomes true once the user picks a variant in this process (then their choice wins).
++      const [variantChosen, setVariantChosen] = createSignal(false)
+       const pendingSelectionCommits = new Map<string, { agentID: string; selection: string }>()
+       const selectionKey = (value: ModelSelection) =>
+         `${modelPreferenceKey(value)}:${normalizeModelVariant(value.variant) ?? "default"}`
+@@ -240,13 +242,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+         const configured = agent.current()?.model
+         const fallback = configuredModel()
+         const preferred = preferences.variant[modelPreferenceKey(model)]
++        // SARNESS: the launch config carries the user's `sarness --effort` / effort setting; it starts each new
++        // session ahead of a remembered preference (switching inside a session still applies to that session).
++        const launched =
++          !variantChosen() && fallback?.providerID === model.providerID && fallback.modelID === model.modelID
++            ? fallback.variant
++            : undefined
+         const variant = normalizeModelVariant(
+-          preferred ??
++          launched ??
++            preferred ??
+             (configured?.providerID === model.providerID && configured.id === model.modelID
+               ? configured.variant
+-              : undefined) ??
+-            (fallback?.providerID === model.providerID && fallback.modelID === model.modelID
+-              ? fallback.variant
+               : undefined),
+         )
+         const info = models()?.find((item) => item.providerID === model.providerID && item.id === model.modelID)
+@@ -488,6 +494,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+           set(value: string | undefined) {
+             const m = currentSelection()
+             if (!m) return
++            setVariantChosen(true)
+             if (route.data.type === "session") {
+               setSessionDraft(route.data.sessionID, { ...m, variant: normalizeModelVariant(value) })
+             }
+diff --git a/packages/tui/src/feature-plugins/home/footer.tsx b/packages/tui/src/feature-plugins/home/footer.tsx
+index d31888c..5ff00ad 100644
+--- a/packages/tui/src/feature-plugins/home/footer.tsx
++++ b/packages/tui/src/feature-plugins/home/footer.tsx
+@@ -3,6 +3,7 @@ import { createMemo, Match, Show, Switch } from "solid-js"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { usePlugin } from "../../plugin/context"
+ import { Slot } from "../../plugin/render"
++import { SarnessLaunch } from "../../sarness"
+ 
+ export function homeFooterVisibility(width: number) {
+   return {
+@@ -96,7 +97,9 @@ function View(props: { context: Plugin.Context }) {
+         <box flexGrow={1} />
+         <Show when={visibility().version}>
+           <box flexShrink={0}>
+-            <text fg={props.context.theme.text.muted}>{props.context.app.version}</text>
++            <text fg={props.context.theme.text.muted}>
++              {SarnessLaunch.version ? `sarness ${SarnessLaunch.version}` : props.context.app.version}
++            </text>
+           </box>
+         </Show>
+       </box>
+diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
+index 8c570fb..1074fa6 100644
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -7,3 +7,12 @@ export const go = {
+   left: ["    ", "█▀▀▀", "█_^█", "▀▀▀▀"],
+   right: ["    ", "█▀▀█", "█__█", "▀▀▀▀"],
+ }
++
++// SARNESS: the wordmark shown on the home screen (3 rows; "_" = shaded cell as in the upstream logo font).
++export const sarness = [
++  "█▀▀▀ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀▀ █▀▀▀",
++  "▀▀▀█ █▀▀█ █▀▀▄ █__█ █▀▀▀ ▀▀▀█ ▀▀▀█",
++  "▀▀▀▀ ▀  ▀ ▀  ▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
++]
++export const sarnessSmall = ["SARNESS"]
++export const sarnessMark = ["█▀▀▀", "▀▀▀█", "▀▀▀▀"]
+diff --git a/packages/tui/src/mini/splash.ts b/packages/tui/src/mini/splash.ts
+index 123b224..b2d4a77 100644
+--- a/packages/tui/src/mini/splash.ts
++++ b/packages/tui/src/mini/splash.ts
+@@ -15,7 +15,7 @@ import {
+ } from "@opentui/core"
+ import { Locale } from "../util/locale"
+ import { stringWidth } from "../util/string-width"
+-import { go } from "../logo"
++import { sarnessMark } from "../logo"
+ import { monoTruncate } from "./mono"
+ import type { RunSplashTheme } from "./theme"
+ 
+@@ -176,12 +176,12 @@ function buildExit(input: SplashWriterInput, ctx: ScrollbackRenderContext): Scro
+   const left = input.theme.left
+   const right = input.theme.right
+   const leftShadow = input.theme.leftShadow
+-  const mark = input.mono ? ["[O]"] : go.right.slice(1)
++  const mark = input.mono ? ["[S]"] : sarnessMark // SARNESS
+   const top = 1
+   const body_left = (mark[0]?.length ?? 0) + 2
+   const session = "Session  "
+   const label = "Continue "
+-  const command = `opencode mini -s ${meta.session_id}`
++  const command = `sarness code --session ${meta.session_id}`
+   const wide = body_left + stringWidth(label + command) <= width
+   const commandHeight = wide ? 1 : Math.ceil(stringWidth(command) / width)
+ 
+diff --git a/packages/tui/src/routes/home.tsx b/packages/tui/src/routes/home.tsx
+index 71e7b64..c63c64e 100644
+--- a/packages/tui/src/routes/home.tsx
++++ b/packages/tui/src/routes/home.tsx
+@@ -15,6 +15,7 @@ import { useTheme } from "../context/theme"
+ import { useUpdateNotification } from "../context/update-notification"
+ import { useExit } from "../context/exit"
+ import { FadeInText } from "../component/fade-in-text"
++import { SarnessLaunch } from "../sarness"
+ 
+ let once = false
+ const placeholder = {
+@@ -23,6 +24,7 @@ const placeholder = {
+ }
+ 
+ export function Home() {
++  const theme = useTheme()
+   const route = useRouteData("home")
+   const promptRef = usePromptRef()
+   const [ref, setRef] = createSignal<PromptRef | undefined>()
+@@ -78,16 +80,12 @@ export function Home() {
+     r.submit()
+   })
+ 
++  // SARNESS: wordmark top-left, composer full width at the bottom (same place as in a session).
++  const gutter = () => (dimensions().width < 44 ? 1 : 2)
+   return (
+     <>
+-      <box
+-        flexGrow={1}
+-        alignItems="center"
+-        paddingLeft={dimensions().width < 44 ? 1 : 2}
+-        paddingRight={dimensions().width < 44 ? 1 : 2}
+-      >
+-        <box flexGrow={1} minHeight={0} />
+-        <box height={3} minHeight={0} flexShrink={1} />
++      <box flexGrow={1} paddingLeft={gutter()} paddingRight={gutter()}>
++        <box height={1} minHeight={0} flexShrink={1} />
+         <box
+           flexShrink={0}
+           onSizeChange={function () {
+@@ -96,12 +94,25 @@ export function Home() {
+         >
+           <Logo />
+         </box>
++        <Show when={dimensions().height >= 12}>
++          <text fg={theme.text.muted} flexShrink={0}>
++            local coding agent<span style={{ fg: theme.border.base }}> · </span>Sarness Engine
++            <Show when={SarnessLaunch.server}>
++              {(server) => (
++                <>
++                  <span style={{ fg: theme.border.base }}> · </span>
++                  {server()}
++                </>
++              )}
++            </Show>
++          </text>
++        </Show>
+         <box height={1} flexShrink={0} />
+         <UpdateNotification width={logoWidth()} />
+-        <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0} position="relative">
++        <box flexGrow={1} minHeight={0} />
++        <box width="100%" zIndex={1000} flexShrink={0} position="relative">
+           <Prompt ref={bind} placeholders={placeholder} disabled={forms().length > 0} />
+         </box>
+-        <box flexGrow={1} minHeight={0} />
+       </box>
+       <box width="100%" flexShrink={0}>
+         <Slot path="home.footer" />
+diff --git a/packages/tui/src/sarness.ts b/packages/tui/src/sarness.ts
+new file mode 100644
+index 0000000..8cc73fa
+--- /dev/null
++++ b/packages/tui/src/sarness.ts
+@@ -0,0 +1,55 @@
++import { spawn } from "node:child_process"
++import { existsSync } from "node:fs"
++import type { CliRenderer } from "@opentui/core"
++
++// SARNESS: facts the `sarness` launcher passes to this terminal (see sarness-cli openai_bridge.py).
++// Only display data lives here; every setting is still enforced by the generated config and the bridge.
++
++export const SarnessLaunch = {
++  /** Engine profile name, e.g. "spark". */
++  server: process.env.SARNESS_SERVER || undefined,
++  /** Sarness permission mode the generated OpenCode permission rules were built from: ask | auto | full-access | bypass. */
++  mode: process.env.SARNESS_MODE || undefined,
++  /** Absolute path of the `sarness` executable, for delegated commands such as /cabinet. */
++  bin: process.env.SARNESS_BIN || undefined,
++  /** Effort the bridge applies when no variant is selected (the Sarness `effort` setting). */
++  effort: process.env.SARNESS_EFFORT || undefined,
++  /** Version of the Sarness CLI that launched this terminal. */
++  version: process.env.SARNESS_VERSION || undefined,
++}
++
++export function sarnessModeLabel(mode: string | undefined, autoaccept: boolean) {
++  if (autoaccept && mode !== "bypass") return "AUTO-ACCEPT"
++  if (!mode) return undefined
++  return mode === "full-access" ? "FULL ACCESS" : mode.toUpperCase()
++}
++
++/** Effort is the OpenCode variant the bridge maps to engine parameters. Engine 0.4 only has thinking on/off. */
++export function sarnessEffortLabel(variant: string | undefined) {
++  const value = variant || SarnessLaunch.effort
++  if (!value) return "Default"
++  return value.charAt(0).toUpperCase() + value.slice(1)
++}
++
++/** Run a `sarness` subcommand in this terminal (TUI suspended), then wait for Enter so its output stays readable. */
++export async function runSarnessCommand(renderer: CliRenderer, args: string[], cwd?: string) {
++  const bin = SarnessLaunch.bin
++  if (!bin) throw new Error("This terminal was not started by `sarness`, so Sarness commands are unavailable")
++  renderer.suspend()
++  renderer.currentRenderBuffer.clear()
++  try {
++    await new Promise<void>((resolve, reject) => {
++      const child = spawn(
++        "/bin/sh",
++        ["-c", '"$0" "$@"; printf "\\n\\033[2m[Enter] back to Sarness\\033[0m "; read _', bin, ...args],
++        { cwd: cwd && existsSync(cwd) ? cwd : process.cwd(), stdio: "inherit" },
++      )
++      child.on("error", reject)
++      child.on("exit", () => resolve())
++    })
++  } finally {
++    renderer.currentRenderBuffer.clear()
++    renderer.resume()
++    renderer.requestRender()
++  }
++}
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+index eb24ad0..3dee274 100644
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -1,4 +1,4 @@
+-import { logo } from "../logo"
++import { sarness } from "../logo"
+ 
+ const reset = "\x1b[0m"
+ const bold = "\x1b[1m"
+@@ -16,11 +16,8 @@ function wordmark(pad = "") {
+       })
+       .join("")
+ 
+-  return logo.left.map((line, index) => {
+-    const left = draw(line, dim, "\x1b[38;5;235m", "\x1b[48;5;235m")
+-    const right = draw(logo.right[index] ?? "", reset, "\x1b[38;5;238m", "\x1b[48;5;238m")
+-    return `${pad}${left} ${right}`
+-  })
++  // SARNESS: the exit screen shows the Sarness wordmark.
++  return sarness.map((line) => `${pad}${draw(line, reset, "\x1b[38;5;238m", "\x1b[48;5;238m")}`)
+ }
+ 
+ export function sessionEpilogue(input: { title: string; sessionID?: string }) {
+@@ -29,7 +26,7 @@ export function sessionEpilogue(input: { title: string; sessionID?: string }) {
+     ...wordmark("  "),
+     "",
+     `  ${weak("Session")}${bold}${input.title}${reset}`,
+-    `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
++    `  ${weak("Continue")}${bold}sarness code --session ${input.sessionID}${reset}`,
+     "",
+   ].join("\n")
+ }
+-- 
+2.53.0
+

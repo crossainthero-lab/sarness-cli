@@ -385,11 +385,34 @@ def test_cli_code_task_autoloads_and_runs_noninteractively(code_env):
     assert s.loads and launches[0]["args"] == ["run", "-m", "sarness/local:coder@Q4", "fix the bug"]
 
 
-def test_cli_plain_sarness_with_opencode_runtime_autoloads(code_env):
+def test_cli_plain_sarness_opens_the_terminal_and_autoloads(code_env, monkeypatch, tmp_path):
     make, launches = code_env
-    s = make(runtime="opencode")
+    fake = tmp_path / "sarness-tui"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("SARNESS_TUI_BIN", str(fake))
+    for runtime in (None, "tui", "opencode"):   # the default runtime is the terminal; "opencode" is a legacy alias
+        s = make(runtime=runtime)
+        assert run() == 0
+        assert s.loads and launches[-1]["selected"] == "local:coder@Q4" and launches[-1]["server"] == "fake"
+
+
+def test_cli_plain_sarness_without_the_terminal_falls_back_to_native(code_env, monkeypatch, capsys):
+    make, launches = code_env
+    make()
+    monkeypatch.setenv("SARNESS_TUI_BIN", "/nonexistent/sarness-tui")
+    monkeypatch.setattr(cli, "start_session", lambda a, prompt, resume_id=None: 0)
     assert run() == 0
-    assert s.loads and launches[0]["selected"] == "local:coder@Q4"
+    assert launches == [] and "sarness tui install" in capsys.readouterr().err
+
+
+def test_cli_native_subcommand_runs_the_python_runtime(code_env, monkeypatch):
+    make, launches = code_env
+    make()
+    seen = []
+    monkeypatch.setattr(cli, "start_session", lambda a, prompt, resume_id=None: seen.append(prompt) or 0)
+    assert run("native") == 0 and run("native", "fix", "it") == 0
+    assert seen == [None, "fix it"] and launches == []
 
 
 def test_cli_code_with_the_model_loaded_launches_immediately_and_keeps_session_flags(code_env):
