@@ -34,6 +34,13 @@
 - The configured effort (`--effort`, the `effort` setting) now selects the terminal's starting variant. In 0.3.x it
   only set the bridge's fallback, while OpenCode remembered its own variant.
 
+### Tested
+- Upstream test suites on the patched tree: `packages/tui` 1490 pass / 0 fail, `packages/cli` 332 pass / 0 fail,
+  `packages/util` 95 pass (pristine v2.0.32 on the same machine: 1491, 331, 95; differences in docs/TERMINAL.md).
+- Live on Linux x64 against Sarness Engine: a multi-step edit-and-test task in ask mode, Esc cancellation (engine
+  stream released within a second), exit/resume, Ctrl+C exit (code 0), `/cabinet`, effort cycling, narrow widths,
+  and resuming a session migrated from 0.3.x.
+
 ### Unchanged
 - 0.3.1 startup (auto-load, readiness wait, memory guard, no silent swaps), the bridge protocol guarantees (cut
   streams, incomplete tool calls, context pinning, cancellation), permission modes, and native sessions.

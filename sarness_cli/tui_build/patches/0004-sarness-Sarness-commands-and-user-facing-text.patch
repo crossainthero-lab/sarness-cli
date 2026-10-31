@@ -1,7 +1,7 @@
 From 053ad7098af88d0c3d87bc1a0d4c5ed1602398f5 Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sat, 31 Oct 2026 13:52:57 +1100
-Subject: [PATCH 4/5] sarness: Sarness commands and user-facing text
+Subject: [PATCH 4/6] sarness: Sarness commands and user-facing text
 
 - /cabinet runs the real 'sarness cabinet' (TUI suspended), /upgrade explains 'sarness upgrade',
   /connect explains that models come only from Sarness Engine; no cloud-provider onboarding

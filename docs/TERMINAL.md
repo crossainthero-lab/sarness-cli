@@ -24,7 +24,7 @@ The `sarness` Python CLI stays the entry point. It resolves settings and permiss
 the workspace. That process gets the generated config (the Sarness provider only, the permission rules, the effort
 variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, `SARNESS_BIN`, `SARNESS_VERSION`).
 
-## Fork delta (5 commits: 4 changes plus the upstream test adaptations, all marked `SARNESS:` in the source)
+## Fork delta (6 commits: 4 changes plus 2 upstream test adaptations, all marked `SARNESS:` in the source)
 
 | area | change |
 | --- | --- |
@@ -62,5 +62,17 @@ not supported by the build recipe.
 
 ## Upstream tests
 
-Run with `bun test` in `packages/tui` of the patched tree. See the 0.4.0 changelog entry for the results against the
-pristine v2.0.32 baseline.
+Run with `bun test --timeout 30000` in each package of the patched tree (Linux x64, Bun 1.4.2), compared with the
+pristine v2.0.32 tree on the same machine:
+
+| package | pristine v2.0.32 | Sarness fork |
+| --- | --- | --- |
+| `packages/tui` | 1491 pass | 1490 pass, 2 skip, 0 fail |
+| `packages/cli` | 331 pass, 9 skip | 332 pass, 9 skip, 0 fail |
+| `packages/util` | 95 pass | 95 pass |
+
+Every upstream failure on the unadapted fork was a deliberate change: the `sarness-code` directories, the Sarness
+strings and theme, the info line text, and the gated updater. The tests were updated to expect them (patches 0005
+and 0006). The TUI count is one lower because the cloud onboarding test was removed with the onboarding. The CLI
+count is one higher because of a new test that the upstream updater refuses to run without
+`SARNESS_ALLOW_UPSTREAM_UPDATER`; the upstream upgrade tests still run with that variable set.

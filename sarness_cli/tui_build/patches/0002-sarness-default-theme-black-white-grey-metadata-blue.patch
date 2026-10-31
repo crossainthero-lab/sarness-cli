@@ -1,7 +1,7 @@
 From 1b611d7bfca5d6d48984705fd78f0ab617ab619e Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sat, 31 Oct 2026 13:52:57 +1100
-Subject: [PATCH 2/5] sarness: default theme (black, white, grey metadata, blue
+Subject: [PATCH 2/6] sarness: default theme (black, white, grey metadata, blue
  accents, no violet)
 
 ---

@@ -1,0 +1,304 @@
+From b56f6d3638baa9f30392b29cb422033d44a65676 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 15:20:29 +1100
+Subject: [PATCH 6/6] sarness: adapt upstream cli tests (sarness-code
+ directories, Sarness strings); cover the updater gate
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/cli/test/acp/error.test.ts           |  2 +-
+ packages/cli/test/acp/session.test.ts         |  4 +-
+ packages/cli/test/debug-config.test.ts        |  2 +-
+ packages/cli/test/debug-paths.test.ts         | 16 +++----
+ packages/cli/test/mini.test.ts                |  2 +-
+ packages/cli/test/pair-remote-consent.test.ts |  2 +-
+ packages/cli/test/service-lifecycle.test.ts   |  2 +-
+ packages/cli/test/service.test.ts             | 44 +++++++++----------
+ packages/cli/test/upgrade.test.ts             | 12 ++++-
+ 9 files changed, 48 insertions(+), 38 deletions(-)
+
+diff --git a/packages/cli/test/acp/error.test.ts b/packages/cli/test/acp/error.test.ts
+index 00be30e..0f39374 100644
+--- a/packages/cli/test/acp/error.test.ts
++++ b/packages/cli/test/acp/error.test.ts
+@@ -33,7 +33,7 @@ describe("acp error boundary over the wire", () => {
+       })
+       const unavailable = {
+         code: -32603,
+-        message: "Internal error: OpenCode server is unavailable",
++        message: "Internal error: Sarness server is unavailable",
+         data: { errorName: "ServerUnavailable" },
+       }
+ 
+diff --git a/packages/cli/test/acp/session.test.ts b/packages/cli/test/acp/session.test.ts
+index 38f7802..7767c6c 100644
+--- a/packages/cli/test/acp/session.test.ts
++++ b/packages/cli/test/acp/session.test.ts
+@@ -24,13 +24,13 @@ describe("acp session lifecycle over the wire", () => {
+         sessionCapabilities: { additionalDirectories: {}, close: {}, delete: {}, fork: {}, list: {}, resume: {} },
+         _meta: { "opencode/child-session-updates": true },
+       },
+-      agentInfo: { name: "OpenCode" },
++      agentInfo: { name: "Sarness" },
+     })
+     expect(plain.authMethods).toEqual([
+       { id: "opencode-login", name: "Login with opencode", description: "Run `opencode auth login` in the terminal" },
+     ])
+     expect(terminal.authMethods?.[0]?._meta).toEqual({
+-      "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "OpenCode Login" },
++      "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "Sarness Login" },
+     })
+     expect(standard.authMethods).toEqual([
+       {
+diff --git a/packages/cli/test/debug-config.test.ts b/packages/cli/test/debug-config.test.ts
+index 8c0c439..73f079f 100644
+--- a/packages/cli/test/debug-config.test.ts
++++ b/packages/cli/test/debug-config.test.ts
+@@ -21,7 +21,7 @@ describe("debug config command", () => {
+   test("prints config entries from the invoking directory without reordering permissions", async () => {
+     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-debug-config-"))
+     const project = path.join(import.meta.dir, "..")
+-    const registration = path.join(root, "state", "opencode", "service-local.json")
++    const registration = path.join(root, "state", "sarness-code", "service-local.json")
+     const entries = [
+       {
+         type: "document",
+diff --git a/packages/cli/test/debug-paths.test.ts b/packages/cli/test/debug-paths.test.ts
+index 60e00ec..7f394a7 100644
+--- a/packages/cli/test/debug-paths.test.ts
++++ b/packages/cli/test/debug-paths.test.ts
+@@ -34,16 +34,16 @@ describe("debug paths command", () => {
+       expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 0, stderr: "" })
+       expect(paths).toMatchObject({
+         home: os.homedir(),
+-        data: path.join(root, "data", "opencode"),
+-        config: path.join(root, "config", "opencode"),
+-        cache: path.join(root, "cache", "opencode"),
+-        state: path.join(root, "state", "opencode"),
+-        bin: path.join(root, "cache", "opencode", "bin"),
+-        log: path.join(root, "data", "opencode", "log"),
+-        repos: path.join(root, "data", "opencode", "repos"),
++        data: path.join(root, "data", "sarness-code"),
++        config: path.join(root, "config", "sarness-code"),
++        cache: path.join(root, "cache", "sarness-code"),
++        state: path.join(root, "state", "sarness-code"),
++        bin: path.join(root, "cache", "sarness-code", "bin"),
++        log: path.join(root, "data", "sarness-code", "log"),
++        repos: path.join(root, "data", "sarness-code", "repos"),
+       })
+       expect(paths.tmp).toBeTruthy()
+-      expect(await Bun.file(path.join(root, "state", "opencode", "service-local.json")).exists()).toBe(false)
++      expect(await Bun.file(path.join(root, "state", "sarness-code", "service-local.json")).exists()).toBe(false)
+     } finally {
+       await fs.rm(root, { recursive: true, force: true })
+     }
+diff --git a/packages/cli/test/mini.test.ts b/packages/cli/test/mini.test.ts
+index 05f84df..67dc5ae 100644
+--- a/packages/cli/test/mini.test.ts
++++ b/packages/cli/test/mini.test.ts
+@@ -128,7 +128,7 @@ describe("mini command", () => {
+ 
+     expect(result.exitCode).toBe(0)
+     expect(result.stdout).toMatch(/^  mini[ \t]+Start the minimal interactive interface\r?$/m)
+-    expect(result.stdout).toMatch(/^  run[ \t]+Run OpenCode with a message\r?$/m)
++    expect(result.stdout).toMatch(/^  run[ \t]+Run Sarness with a message\r?$/m)
+   })
+ 
+   test("exposes run without legacy interactive, attach, or command modes", async () => {
+diff --git a/packages/cli/test/pair-remote-consent.test.ts b/packages/cli/test/pair-remote-consent.test.ts
+index a321098..fdcc5a8 100644
+--- a/packages/cli/test/pair-remote-consent.test.ts
++++ b/packages/cli/test/pair-remote-consent.test.ts
+@@ -110,7 +110,7 @@ test("pair --remote without a terminal fails before enabling anything, and help
+   expect(pair.exitCode).toBe(1)
+   expect(pair.output).toBe(
+     [
+-      "This will expose your OpenCode server to the internet.",
++      "This will expose your Sarness server to the internet.",
+       "Traffic is end-to-end encrypted, and access requires your server password.",
+       "To pair locally instead, run `opencode pair` without the --remote flag.",
+       "Run interactively or pass --yes to continue.",
+diff --git a/packages/cli/test/service-lifecycle.test.ts b/packages/cli/test/service-lifecycle.test.ts
+index f0b0223..220a6cc 100644
+--- a/packages/cli/test/service-lifecycle.test.ts
++++ b/packages/cli/test/service-lifecycle.test.ts
+@@ -187,7 +187,7 @@ async function serviceHome(options: { readonly failBoot?: boolean } = {}) {
+     root,
+     port,
+     entry: homeEntry,
+-    registration: path.join(root, "state", "opencode", "service-local.json"),
++    registration: path.join(root, "state", "sarness-code", "service-local.json"),
+     env: Object.fromEntries(
+       Object.entries(isolatedEnv(root, overrides)).filter((entry): entry is [string, string] => entry[1] !== undefined),
+     ),
+diff --git a/packages/cli/test/service.test.ts b/packages/cli/test/service.test.ts
+index b4fbaba..d9462e4 100644
+--- a/packages/cli/test/service.test.ts
++++ b/packages/cli/test/service.test.ts
+@@ -194,7 +194,7 @@ test("service config manages environment variables", async () => {
+ 
+ test("managed service loads configured environment", async () => {
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-env-"))
+-  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
++  const registration = path.join(root, "state", "sarness-code", ServiceConfig.filename())
+   await fs.mkdir(path.join(root, "config"), { recursive: true })
+   await fs.writeFile(
+     path.join(root, "config", ServiceConfig.filename()),
+@@ -382,10 +382,10 @@ test("concurrent service processes elect one server", async () => {
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-election-"))
+   const env = serviceEnv(root)
+   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
+   const port = await availablePort()
+-  const config = path.join(root, "config", "opencode", "service-local.json")
+-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
++  const config = path.join(root, "config", "sarness-code", "service-local.json")
++  await fs.mkdir(path.join(root, "config", "sarness-code"), { recursive: true })
+   await fs.writeFile(config, JSON.stringify({ port }))
+   const processes = Array.from({ length: 10 }, () => Bun.spawn(command, { env, stderr: "pipe", stdout: "pipe" }))
+ 
+@@ -420,7 +420,7 @@ test("concurrent service processes elect one server", async () => {
+       pid: info.pid,
+       urls: [info.url],
+       // The server reports the canonical tmp directory; Windows os.tmpdir() can be an 8.3 short name.
+-      paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "opencode")) },
++      paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "sarness-code")) },
+       capabilities: { persistentPty: process.platform !== "win32" },
+     })
+     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
+@@ -450,9 +450,9 @@ test("configured managed service port overrides the channel default", async () =
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-port-"))
+   const port = await availablePort()
+   const env = serviceEnv(root)
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
+-  const config = path.join(root, "config", "opencode", "service-local.json")
+-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
++  const config = path.join(root, "config", "sarness-code", "service-local.json")
++  await fs.mkdir(path.join(root, "config", "sarness-code"), { recursive: true })
+   await fs.writeFile(config, JSON.stringify({ port, password: "" }))
+   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+     env,
+@@ -484,7 +484,7 @@ test.each([
+   async ({ args, origins }) => {
+     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-cors-"))
+     const config = path.join(root, "config", ServiceConfig.filename())
+-    const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
++    const registration = path.join(root, "state", "sarness-code", ServiceConfig.filename())
+     const cors = ["http://192.0.2.10:3001", "https://configured.example.com"]
+     await fs.mkdir(path.dirname(config), { recursive: true })
+     await fs.writeFile(config, JSON.stringify({ cors }))
+@@ -530,7 +530,7 @@ test("the original managed service contender binds when the occupied port is rel
+   })
+   const port = listener.port
+   if (port === undefined) throw new Error("Server did not bind a port")
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
+   await fs.mkdir(path.join(root, "config"), { recursive: true })
+   await fs.mkdir(path.dirname(registration), { recursive: true })
+   await fs.writeFile(path.join(root, "config", "service-local.json"), JSON.stringify({ port }))
+@@ -599,11 +599,11 @@ test("unresponsive managed port occupancy reports a bounded conflict", async ()
+       return new Promise<Response>(() => {})
+     },
+   })
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
+-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
++  await fs.mkdir(path.join(root, "config", "sarness-code"), { recursive: true })
+   await fs.mkdir(path.dirname(registration), { recursive: true })
+   await fs.writeFile(
+-    path.join(root, "config", "opencode", "service-local.json"),
++    path.join(root, "config", "sarness-code", "service-local.json"),
+     JSON.stringify({ port: listener.port }),
+   )
+   const stale = {
+@@ -650,8 +650,8 @@ test("port contender recognizes an incumbent registered during the bind race", a
+       )
+     },
+   })
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
+-  const config = path.join(root, "config", "opencode", "service-local.json")
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
++  const config = path.join(root, "config", "sarness-code", "service-local.json")
+   await fs.mkdir(path.dirname(config), { recursive: true })
+   await fs.writeFile(config, JSON.stringify({ port: listener.port }))
+   await fs.mkdir(path.dirname(registration), { recursive: true })
+@@ -694,7 +694,7 @@ test("port contender recognizes an incumbent registered during the bind race", a
+ 
+ test("service registration replaces a stale owner with the bound address", async () => {
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-stale-"))
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
+   await fs.mkdir(path.dirname(registration), { recursive: true })
+   await fs.writeFile(
+     registration,
+@@ -729,11 +729,11 @@ test("a failed service stays registered and owns the selected port until stopped
+   const port = await availablePort()
+   const database = path.join(root, "database")
+   await fs.mkdir(database)
+-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+-  await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
++  await fs.mkdir(path.join(root, "config", "sarness-code"), { recursive: true })
++  await fs.writeFile(path.join(root, "config", "sarness-code", "service-local.json"), JSON.stringify({ port }))
+   const env = { ...serviceEnv(root), OPENCODE_DB: database }
+   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
+   const owner = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
+ 
+   try {
+@@ -835,10 +835,10 @@ function serviceEnv(root: string) {
+ async function startManagedService(prefix: string, failBoot = false) {
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+   const port = await availablePort()
+-  const registration = path.join(root, "state", "opencode", "service-local.json")
+-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
++  const registration = path.join(root, "state", "sarness-code", "service-local.json")
++  await fs.mkdir(path.join(root, "config", "sarness-code"), { recursive: true })
+   if (failBoot) await fs.mkdir(path.join(root, "database"))
+-  await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
++  await fs.writeFile(path.join(root, "config", "sarness-code", "service-local.json"), JSON.stringify({ port }))
+   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+     env: failBoot ? { ...serviceEnv(root), OPENCODE_DB: path.join(root, "database") } : serviceEnv(root),
+     stderr: "pipe",
+diff --git a/packages/cli/test/upgrade.test.ts b/packages/cli/test/upgrade.test.ts
+index 7ba3b3c..55501f8 100644
+--- a/packages/cli/test/upgrade.test.ts
++++ b/packages/cli/test/upgrade.test.ts
+@@ -15,6 +15,14 @@ describe("upgrade command", () => {
+     expect(help.stdout).toContain("-m")
+   })
+ 
++  // SARNESS
++  test("refuses to run the upstream updater unless explicitly allowed", async () => {
++    const result = await cli(["upgrade"], { SARNESS_ALLOW_UPSTREAM_UPDATER: "" })
++    expect(result.exitCode).not.toBe(0)
++    expect(result.stdout + result.stderr).toContain("sarness upgrade")
++    expect(result.events).toEqual([])
++  })
++
+   test("detects the installation method and resolves the latest version", async () => {
+     const result = await cli([])
+     expect(result.exitCode).toBe(0)
+@@ -98,6 +106,8 @@ async function cli(args: string[], env: Record<string, string> = {}, entry = "fi
+           XDG_CACHE_HOME: path.join(root, "cache"),
+           XDG_STATE_HOME: path.join(root, "state"),
+           OPENCODE_DISABLE_AUTOUPDATE: "1",
++          // SARNESS: the upstream updater is gated off in Sarness; these tests exercise the retained code path.
++          SARNESS_ALLOW_UPSTREAM_UPDATER: "1",
+           ...env,
+         },
+         stdout: "pipe",
+@@ -113,7 +123,7 @@ async function cli(args: string[], env: Record<string, string> = {}, entry = "fi
+       .split("\n")
+       .filter((line) => line.startsWith("EVENT "))
+       .map((line) => JSON.parse(line.slice(6)))
+-    expect(await Bun.file(path.join(root, "state", "opencode", "service-local.json")).exists()).toBe(false)
++    expect(await Bun.file(path.join(root, "state", "sarness-code", "service-local.json")).exists()).toBe(false)
+     return { stdout, stderr, exitCode, events }
+   } finally {
+     await rm(root, { recursive: true, force: true })
+-- 
+2.53.0
+

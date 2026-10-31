@@ -1,7 +1,7 @@
 From e654ede58f3d2bfbd3ca9fe121a79053b3cbb3be Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sat, 31 Oct 2026 14:04:28 +1100
-Subject: [PATCH 5/5] sarness: adapt upstream tests to the Sarness identity,
+Subject: [PATCH 5/6] sarness: adapt upstream tests to the Sarness identity,
  theme and info line; agent label as named
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

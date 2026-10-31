@@ -1,7 +1,7 @@
 From 2f1a14521b1006e78ec860268e28e858bb473531 Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sat, 31 Oct 2026 13:52:57 +1100
-Subject: [PATCH 3/5] sarness: bordered composer with the
+Subject: [PATCH 3/6] sarness: bordered composer with the
  model/effort/server/permission line, SARNESS wordmark
 
 - composer: full-width rules above and below, a marker, no filled panel

@@ -1,7 +1,7 @@
 From 819016b83b6fcdd9ec4887219ade8871235591d7 Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sat, 31 Oct 2026 13:52:57 +1100
-Subject: [PATCH 1/5] sarness: own storage directories, executable identity and
+Subject: [PATCH 1/6] sarness: own storage directories, executable identity and
  installer behaviour
 
 - data/config/state/cache under sarness-code, so a separate opencode install is never read or modified
