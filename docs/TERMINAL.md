@@ -24,7 +24,7 @@ The `sarness` Python CLI stays the entry point. It resolves settings and permiss
 the workspace. That process gets the generated config (the Sarness provider only, the permission rules, the effort
 variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, `SARNESS_BIN`, `SARNESS_VERSION`).
 
-## Fork delta (7 commits: 5 changes plus 2 upstream test adaptations, all marked `SARNESS:` in the source)
+## Fork delta (12 patches: changes plus upstream test adaptations, all marked `SARNESS:` in the source)
 
 | area | change |
 | --- | --- |
@@ -37,13 +37,15 @@ variant) and display facts (`SARNESS_SERVER`, `SARNESS_MODE`, `SARNESS_EFFORT`, 
 | home | SARNESS wordmark (3 rows) top-left, a muted tagline, and the composer at the bottom. The footer shows the `sarness` version. The exit screen and `run` splash use the Sarness mark |
 | commands | `/cabinet` suspends the TUI and runs the real `sarness cabinet` (then Enter returns). `/connect` explains that models come only from Sarness Engine. Cloud "free models" onboarding is removed |
 | effort | the launch config's variant (your `--effort`/setting) starts each new session until you pick one with `ctrl+t` |
-| ctrl+c | `app.tsx`, `component/prompt/index.tsx`, `config/keybind.ts` (patch 0007): the first press cancels running work, else clears, else exits; works during startup (see below) |
+| ctrl+c | `app.tsx`, `component/prompt/index.tsx`, `config/keybind.ts` (patch 0007): the first press cancels running work, else clears, else exits; works during startup (see below). Patch 0010: also stops a `!` command the client has not listed yet |
+| auto-compaction | patch 0008: `/autocompact on\|off\|status` per session, shown in the sidebar; patch 0009: a session that never chose follows the launcher's default (`SARNESS_AUTOCOMPACT_DEFAULT`, from the `autocompact` setting) |
+| compaction | patch 0009 (`session/compaction.ts`, `runner/to-llm-message.ts`): working room for 32-64k windows, a bounded verbatim part, the user's request always kept beside the summary, the tail of long outputs kept, a checkpoint that says the request is still in force. `skill/instructions.ts`: a large skills catalogue shrinks to one sentence each. See docs/GUARD.md |
 
 Sessions from 0.3.x (stock OpenCode storage) are copied per project with `sarness tui migrate`: upstream's own
 `session list|export --standalone` on the OpenCode side and `session import --standalone` on the Sarness side. The
 `--standalone` matters: without it each call starts a persistent background service.
 
-Not changed: the agent loop, tools, sessions, compaction, undo, subagents, MCP, skills, permissions engine, server,
+Not changed: the agent loop, tools, sessions, undo, subagents, MCP, skills, permissions engine, server,
 protocol and internal package names (`@opencode/*`). Project-level `.opencode/` directories and `AGENTS.md` are still
 read, as upstream does.
 

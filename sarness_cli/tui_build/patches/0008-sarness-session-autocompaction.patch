@@ -1,0 +1,491 @@
+From 510a457c5ed352f2f1481140b9475a52959b8290 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 23:32:30 +1100
+Subject: [PATCH] feat(sarness): persist session auto-compaction controls
+
+---
+ packages/core/src/session/compaction.ts       | 36 +++++++++------
+ packages/core/src/session/runner/llm.ts       | 11 +++--
+ packages/core/test/config/compaction.test.ts  | 14 +++++-
+ packages/core/test/session-compaction.test.ts | 30 ++++++++++--
+ .../test/session-native-compaction.test.ts    |  1 +
+ packages/core/test/session-runner.test.ts     | 18 ++++----
+ packages/tui/src/component/prompt/index.tsx   | 24 ++++++++++
+ .../src/feature-plugins/sidebar/context.tsx   |  8 +++-
+ packages/tui/src/routes/session/index.tsx     | 46 ++++++++++++++++++-
+ packages/tui/src/util/session.ts              |  4 ++
+ 10 files changed, 161 insertions(+), 31 deletions(-)
+
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+index 3cb5279..e399e5a 100644
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -37,6 +37,7 @@ import { SessionRunnerRetry } from "./runner/retry.js"
+ import { toLLMMessages } from "./runner/to-llm-message.js"
+ import { contentFilterError, toSessionError } from "./to-session-error.js"
+ import { SessionUsage } from "./usage.js"
++import { SessionStore } from "./store.js"
+ 
+ export type Settings = {
+   auto: boolean
+@@ -52,7 +53,7 @@ export type Editor = {
+ 
+ export type Trigger =
+   /** `overflow`: the provider just rejected this context as too long. */
+-  | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded }
++  | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded; readonly previousEstimate?: number }
+   /** `inputID` is the `/compact` inbox item, whose message shows the outcome. */
+   | { readonly reason: "manual"; readonly context: SessionContext.Loaded; readonly inputID: SessionMessage.ID }
+ 
+@@ -95,8 +96,6 @@ const NOTHING_TO_COMPACT: Failure = { error: { type: "compaction.unavailable", m
+ const SHRINK_STEPS = [0.7, 0.5, 0.35]
+ // The least of the window kept free for the last reply before compaction and for the summary itself.
+ const RESERVE_MIN = 16_000
+-/** A common window size, assumed for the compaction request when the model's window is unknown. */
+-const UNKNOWN_WINDOW = 200_000
+ const TOOL_OUTPUT_MAX_CHARS = 1_250
+ const IMAGE_TOKEN_ESTIMATE = 1_500
+ const PDF_TOKEN_ESTIMATE = 2_000
+@@ -191,6 +190,7 @@ export const layer = Layer.effect(
+     const models = yield* SessionRunnerModel.Service
+     const db = (yield* Database.Service).db
+     const requests = yield* SessionModelRequest.Service
++    const sessions = yield* SessionStore.Service
+ 
+     const state = State.create<Settings, Editor>({
+       name: "session-compaction",
+@@ -207,9 +207,15 @@ export const layer = Layer.effect(
+       const context = trigger.context
+ 
+       // Only the user compacts when automatic compaction is off, overflow included.
+-      if (trigger.reason !== "manual" && !settings.auto) return { status: "skipped" }
+-      if (trigger.reason === "auto" && !due(context, calculateCeiling(context.model.limit, settings.buffer)))
++      // SARNESS: the per-session choice is durable and intentionally independent of OpenCode config.
++      if (trigger.reason !== "manual" && (yield* sessions.get(context.session.id))?.metadata?.sarnessAutoCompact !== true)
+         return { status: "skipped" }
++      if (trigger.reason === "auto" && !due(context, calculateCeiling(context.model.limit, settings.buffer, true)))
++        return { status: "skipped" }
++      // SARNESS: a second summary must not repeat an ineffective compaction indefinitely.
++      if (trigger.reason !== "manual" && trigger.previousEstimate !== undefined &&
++          estimateContext(context) >= trigger.previousEstimate * 0.9)
++        return { status: "failed", error: { type: "compaction.failed", message: "Automatic compaction did not reduce context enough. Use /compact or start a new session." } }
+       const native = context.model.compaction?.type === "native"
+       const agent = native ? undefined : yield* agents.get(Agent.ID.make("compaction"))
+       const model =
+@@ -219,10 +225,10 @@ export const layer = Layer.effect(
+             .pipe(Effect.orElseSucceed(() => undefined)))) ??
+         context.model
+       const ceiling = calculateCeiling(model.limit, settings.buffer)
+-      // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
+-      const cap = Number.isFinite(ceiling)
+-        ? ceiling
+-        : calculateCeiling({ ...model.limit, context: UNKNOWN_WINDOW }, settings.buffer)
++      // SARNESS: never invent a model window when the backend did not report one.
++      if (!Number.isFinite(ceiling) && trigger.reason !== "manual")
++        return { status: "failed", error: { type: "compaction.failed", message: "Model context limit is unknown; compaction cannot be safely sized." } }
++      const cap = ceiling
+       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
+       const budget =
+         trigger.reason === "overflow" ? Math.min(cap, Math.floor(estimateContext(context) * SHRINK_STEPS[0])) : cap
+@@ -683,7 +689,7 @@ export const layer = Layer.effect(
+ export const node = makeLocationNode({
+   service: Service,
+   layer,
+-  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
++  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node, SessionStore.node],
+ })
+ 
+ /** History loads from the latest completed compaction, so a previous one is always the first message. */
+@@ -908,13 +914,17 @@ export const estimatePrompt = (context: SessionContext.Loaded) => {
+  * is more. The summary request is capped at the same size, so its output limit is whatever the reserve leaves. A window
+  * too small to give up `RESERVE_MIN` keeps 10%.
+  */
+-const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: number | undefined) => {
++const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: number | undefined, reserveOutput = false) => {
+   // Unknown limits are reported as 0. An unknown input limit falls back to the context window; with no window at
+   // all, only a provider rejection can limit the request.
+   const window = limit.input || limit.context
+   if (window <= 0) return Number.POSITIVE_INFINITY
+-  if (buffer !== undefined) return window - buffer
+-  return window - Math.max(Math.floor(window * 0.1), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
++  const reserve = buffer ?? Math.max(Math.floor(window * 0.1), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
++  // Primary requests fit their output to the remaining room. Reserve up to a quarter of the window,
++  // so models advertising their whole context as output do not compact an empty session.
++  const outputReserve = Math.min(limit.output || 0, Math.floor(limit.context / 4))
++  const contextCeiling = reserveOutput && limit.context > 0 ? limit.context - outputReserve : window
++  return Math.max(0, Math.min(window - reserve, contextCeiling))
+ }
+ 
+ /**
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+index a6dd35c..f130d39 100644
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -213,13 +213,15 @@ const layer = Layer.effect(
+       let initial: SessionContext.Loaded | undefined = first
+       let recoverOverflow = true
+       let recoverContinuation = true
++      let previousCompactionEstimate: number | undefined
+       while (true) {
+         // Reuse boundary preparation once; retries refresh context without delivering more input.
+         const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
+         initial = undefined
+-        const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
++        const compacted = yield* compaction.compact({ reason: "auto", context: loaded, previousEstimate: previousCompactionEstimate })
+         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
+         if (compacted.status === "completed") {
++          previousCompactionEstimate = SessionCompaction.estimateContext(loaded)
+           assistantMessageID = SessionMessage.ID.create()
+           continue
+         }
+@@ -265,8 +267,11 @@ const layer = Layer.effect(
+           recoverOverflow: Effect.suspend(() =>
+             recoverOverflow
+               ? compaction
+-                  .compact({ reason: "overflow", context: loaded })
+-                  .pipe(Effect.map((result) => result.status === "completed"))
++                  .compact({ reason: "overflow", context: loaded, previousEstimate: previousCompactionEstimate })
++                  .pipe(Effect.map((result) => {
++                    if (result.status === "completed") previousCompactionEstimate = SessionCompaction.estimateContext(loaded)
++                    return result.status === "completed"
++                  }))
+               : Effect.succeed(false),
+           ),
+         })
+diff --git a/packages/core/test/config/compaction.test.ts b/packages/core/test/config/compaction.test.ts
+index d0ca30d..f781d6d 100644
+--- a/packages/core/test/config/compaction.test.ts
++++ b/packages/core/test/config/compaction.test.ts
+@@ -2,6 +2,10 @@ import { describe, expect } from "bun:test"
+ import { LanguageModel, LLMClient, LLMEvent } from "@opencode/ai"
+ import { OpenAIChat } from "@opencode/ai/protocols"
+ import { Bus } from "@opencode/core/bus"
++import { Database } from "@opencode/core/database/database"
++import { ProjectTable } from "@opencode/core/project/sql"
++import { SessionTable } from "@opencode/core/session/sql"
++import { eq } from "drizzle-orm"
+ import { Config } from "@opencode/core/config"
+ import { ConfigCompactionPlugin } from "@opencode/core/config/plugin/compaction"
+ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+@@ -39,7 +43,7 @@ const config = Config.testLayer()
+ const it = testEffect(
+   Layer.merge(
+     config,
+-    AppNodeBuilder.build(LayerNode.group([SessionCompaction.node, SessionModelRequest.node, Config.node, Bus.node]), [
++    AppNodeBuilder.build(LayerNode.group([SessionCompaction.node, SessionModelRequest.node, Config.node, Bus.node, Database.node]), [
+       llmClient.replace(
+         Layer.mock(LLMClient.Service)({
+           stream: () => Stream.make(LLMEvent.textDelta({ id: "summary", text: "## Objective\n- summary" })),
+@@ -54,6 +58,9 @@ describe("ConfigCompactionPlugin.Plugin", () => {
+   it.live("merges settings and reloads changed config", () =>
+     Effect.gen(function* () {
+       const compaction = yield* SessionCompaction.Service
++      const db = (yield* Database.Service).db
++      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/tmp"), sandboxes: [] }).onConflictDoNothing().run().pipe(Effect.orDie)
++      yield* db.insert(SessionTable).values({ id: session.id, project_id: Project.ID.global, slug: session.id, directory: "/tmp", version: "test" }).run().pipe(Effect.orDie)
+       // An automatic compaction that is not due is skipped.
+       const due = (input: typeof nearInput) =>
+         compaction
+@@ -105,6 +112,11 @@ describe("ConfigCompactionPlugin.Plugin", () => {
+       ).toEqual({ status: "completed" })
+       expect(Option.getOrThrow(yield* Fiber.join(ended)).data.recent).toContain("Recent context")
+ 
++      // SARNESS: the session override takes precedence even while global auto is false.
++      yield* db.update(SessionTable).set({ metadata: { sarnessAutoCompact: true } }).where(eq(SessionTable.id, session.id)).run().pipe(Effect.orDie)
++      expect(yield* due(nearInput)).toBe(true)
++      expect(yield* due(bufferedInput)).toBe(false)
++
+       yield* config.setEntries([
+         new Document({
+           type: "document",
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+index 1361a0b..13160a9 100644
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -170,7 +170,7 @@ test("compaction prompts prohibit task execution", () => {
+ it.effect("auto compaction estimates current content against the buffered prompt ceiling", () =>
+   Effect.gen(function* () {
+     const compaction = yield* SessionCompaction.Service
+-    const session = yield* insertSession(Session.ID.make("ses_input_limit"))
++    const session = yield* insertSession(Session.ID.make("ses_input_limit"), { metadata: { sarnessAutoCompact: true } })
+     const input = (tokens: number, limit: { context: number; input?: number; output: number }) => ({
+       session,
+       model: SessionRunnerModel.resolved(model, {
+@@ -222,10 +222,10 @@ it.effect("auto compaction estimates current content against the buffered prompt
+     expect(yield* due(input(83_999, contextLimited))).toBe(false)
+     expect(yield* due(input(84_000, contextLimited))).toBe(true)
+ 
+-    // The reply limit does not lower the ceiling.
++    // Reserve the configured reply budget within the actual context window.
+     const outputLimited = { context: 100_000, output: 30_000 }
+-    expect(yield* due(input(83_999, outputLimited))).toBe(false)
+-    expect(yield* due(input(84_000, outputLimited))).toBe(true)
++    expect(yield* due(input(74_999, outputLimited))).toBe(false)
++    expect(yield* due(input(75_000, outputLimited))).toBe(true)
+ 
+     const assistant = input(89_000, contextLimited).messages[0]
+     const tool = SessionMessage.AssistantTool.make({
+@@ -333,6 +333,28 @@ const loaded = (session: Session.Info, messages: readonly SessionMessage.Info[])
+   tools: { definitions: [], execute: () => Effect.die("Compaction must not execute tools") },
+ })
+ 
++it.effect("Sarness session metadata gates real automatic and overflow compaction", () =>
++  Effect.gen(function* () {
++    const session = yield* insertSession(Session.ID.make("ses_sarness_autocompact"))
++    const compaction = yield* SessionCompaction.Service
++    const db = (yield* Database.Service).db
++    const context = {
++      ...loaded(session, []),
++      model: { ...resolved, limit: { context: 128, output: 16 } },
++      initial: "x".repeat(4096),
++    }
++    expect((yield* compaction.compact({ reason: "auto", context })).status).toBe("skipped")
++    expect((yield* compaction.compact({ reason: "overflow", context })).status).toBe("skipped")
++    yield* db.update(SessionTable).set({ metadata: { sarnessAutoCompact: true } }).where(eq(SessionTable.id, session.id)).run().pipe(Effect.orDie)
++    // A tiny model window makes this due; an empty transcript may fail to summarize,
++    // but reaching that decision proves the actual gate was crossed.
++    expect((yield* compaction.compact({ reason: "auto", context })).status).not.toBe("skipped")
++    expect(yield* compaction.compact({ reason: "auto", context, previousEstimate: SessionCompaction.estimateContext(context) })).toMatchObject({ status: "failed", error: { type: "compaction.failed" } })
++    yield* db.update(SessionTable).set({ metadata: { sarnessAutoCompact: false } }).where(eq(SessionTable.id, session.id)).run().pipe(Effect.orDie)
++    expect((yield* compaction.compact({ reason: "overflow", context })).status).toBe("skipped")
++  }),
++)
++
+ /** Opens the compaction's message as the runner does when it delivers `/compact`, then compacts. */
+ const compactManually = (
+   session: Session.Info,
+diff --git a/packages/core/test/session-native-compaction.test.ts b/packages/core/test/session-native-compaction.test.ts
+index 35e4b3f..ccfd572 100644
+--- a/packages/core/test/session-native-compaction.test.ts
++++ b/packages/core/test/session-native-compaction.test.ts
+@@ -162,6 +162,7 @@ const setup = Effect.fnUntraced(function* (options: { endpoint?: boolean } = {})
+     location: { directory: AbsolutePath.make("/project") },
+     slug: "native-compaction",
+     version: "test",
++    metadata: { sarnessAutoCompact: true },
+   })
+   const session = yield* store.get(sessionID)
+   if (!session) return yield* Effect.die("Missing fixture session")
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+index 431e514..3a9d55b 100644
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -554,6 +554,8 @@ const setup = Effect.gen(function* () {
+     .run()
+     .pipe(Effect.orDie)
+   yield* insertSession(sessionID)
++  // Existing runner scenarios exercise automatic compaction explicitly; production defaults off.
++  yield* db.update(SessionTable).set({ metadata: { sarnessAutoCompact: true } }).where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+   const state = yield* RunnerState
+   const session = yield* Session.Service
+   const llm = yield* TestLLM.Service
+@@ -1511,6 +1513,7 @@ describe("SessionRunnerLLM", () => {
+     function* (s) {
+       const compaction = yield* SessionCompaction.Service
+       yield* compaction.transform((editor) => editor.configure({ auto: false }))
++      yield* s.db.update(SessionTable).set({ metadata: { sarnessAutoCompact: false } }).where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+       yield* s.runPrompt("Original request")
+       s.systemBaseline = "Checkpoint instructions"
+       yield* s.runPrompt("Before checkpoint")
+@@ -3179,6 +3182,7 @@ describe("SessionRunnerLLM", () => {
+     expect(JSON.stringify(s.requests[6].messages)).not.toContain('"encrypted":"first"')
+     const compaction = yield* SessionCompaction.Service
+     yield* compaction.transform((editor) => editor.configure({ auto: false }))
++    yield* s.db.update(SessionTable).set({ metadata: { sarnessAutoCompact: false } }).where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+     yield* replaySessionProjection(sessionID)
+     yield* s.llm.push(TestLLM.text("Disabled auto still replays", "disabled"))
+     yield* s.runPrompt("Fifth real request")
+@@ -3352,6 +3356,7 @@ describe("SessionRunnerLLM", () => {
+     yield* setupOverflowRecovery(s)
+     const compaction = yield* SessionCompaction.Service
+     yield* compaction.transform((editor) => editor.configure({ auto: false }))
++    yield* s.db.update(SessionTable).set({ metadata: { sarnessAutoCompact: false } }).where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+     yield* s.llm.push(
+       [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
+       TestLLM.text("Must not compact", "text-unexpected-summary"),
+@@ -3374,7 +3379,7 @@ describe("SessionRunnerLLM", () => {
+     )
+   })
+ 
+-  scenario("recovers from provider context overflow without a configured context limit", function* (s) {
++  scenario("stops on provider context overflow when the context limit is unknown", function* (s) {
+     yield* setupOverflowRecovery(s)
+     s.currentModel = unknownContextModel
+     yield* s.llm.push(
+@@ -3382,13 +3387,10 @@ describe("SessionRunnerLLM", () => {
+       TestLLM.text("## Objective\n- Recover unknown limit", "text-summary-unknown-limit"),
+       TestLLM.text("Recovered", "text-final-unknown-limit"),
+     )
+-    yield* s.runPrompt("Continue")
+-
+-    expect(s.requests).toHaveLength(3)
+-    expect(yield* s.context).toMatchObject([
+-      { type: "compaction", summary: "## Objective\n- Recover unknown limit" },
+-      { type: "assistant", finish: "stop" },
+-    ])
++    yield* s.admit("Continue")
++    expect((yield* s.resume.pipe(Effect.flip)).message).toBe("prompt too long")
++    expect(s.requests).toHaveLength(1)
++    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+   })
+ 
+   scenario("compacts before requesting an undersized configured context limit", function* (s) {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index b8198b6..1da00ed 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -263,6 +263,30 @@ export function Prompt(props: PromptProps) {
+     mode: "global",
+     enabled: !disabled(),
+     commands: [
++      // SARNESS: allow the session-scoped command on the initial empty screen.
++      ...(!props.sessionID ? [{
++        id: "session.autocompact.home",
++        title: "Auto-compaction: on, off, or status",
++        slash: { name: "autocompact", arguments: true as const },
++        run: async (input?: string) => {
++          const value = (input ?? "").trim().toLowerCase()
++          if (!["", "status", "on", "off"].includes(value)) {
++            toast.show({ message: "Usage: /autocompact on|off|status", variant: "warning" })
++            return
++          }
++          try {
++            const created = data.session.create({ location: currentLocation.ref ?? data.location.default() })
++            await created.request
++            if (value === "on" || value === "off")
++              await client.api.session.update({ sessionID: created.id, metadata: { sarnessAutoCompact: value === "on" } })
++            route.navigate({ type: "session", sessionID: created.id })
++            toast.show({
++              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: OFF (current session)${value === "" ? " — /autocompact on|off|status" : ""}`,
++              variant: "info",
++            })
++          } catch (error) { toast.error(error) }
++        },
++      }] : []),
+       {
+         id: "session.cd",
+         title: "Change working directory",
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+index 3ea5af7..b31cb83 100644
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -18,11 +18,12 @@ export function SidebarContext(props: { context: Plugin.Context; sessionID: stri
+   )
+ 
+   return (
+-    <Show when={state() || cost() > 0}>
++    <Show when={session()}>
+       <box>
+         <text fg={theme.text.base}>
+           <b>Context</b>
+         </text>
++        <text fg={theme.text.muted}>Auto-compaction: {session()?.metadata?.sarnessAutoCompact === true ? "ON" : "OFF"}</text>
+         <Show when={state()}>
+           {(value) => (
+             <>
+@@ -33,6 +34,11 @@ export function SidebarContext(props: { context: Plugin.Context; sessionID: stri
+             </>
+           )}
+         </Show>
++        <Show when={session()?.metadata?.sarnessAutoCompact !== true && (state()?.usablePercent ?? 0) >= 80}>
++          <text fg={theme.text.feedback.warning.base} wrapMode="word">
++            Context is approaching the model limit. Use /compact or start a new session.
++          </text>
++        </Show>
+         <Show when={cost() > 0}>
+           <text fg={theme.text.muted}>{money.format(cost())} spent</text>
+         </Show>
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 0b8228e..9e95b29 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -120,6 +120,7 @@ import { createSingleFlight } from "../../util/single-flight"
+ import { createDelayedPresence } from "../../util/delayed-presence"
+ import { SessionLocationMissing } from "./location-missing"
+ import { isRecord } from "../../util/record"
++import { contextUsage } from "../../util/session"
+ import { createHistoryPrepend } from "./history"
+ import { context, use, type PendingAction } from "./render-context"
+ import { INLINE_TOOL_ICON_WIDTH, InlineToolRow, ReasoningPart, TextPart, toolDisplay } from "./message-parts"
+@@ -254,9 +255,19 @@ export function Session(props: {
+   }))
+   const contentWidth = createMemo(() => (props.width ?? dimensions().width - props.verticalTabsWidth) - 4)
+   const models = createMemo(() => data.location.model.list(location()) ?? [])
++  const toast = useToast()
++  let warnedContext = false
++  createEffect(() => {
++    const usage = contextUsage(messages(), models(), session()?.revert?.messageID)
++    const nearLimit = session()?.metadata?.sarnessAutoCompact !== true && (usage?.usablePercent ?? 0) >= 80
++    if (nearLimit && !warnedContext) {
++      warnedContext = true
++      toast.show({ message: `Context is ${usage?.percent}% full. Use /compact or start a new session.`, variant: "warning", duration: 10000 })
++    }
++    if (!nearLimit) warnedContext = false
++  })
+ 
+   const scrollAcceleration = createMemo(() => getScrollAcceleration(config))
+-  const toast = useToast()
+   const client = useClient()
+   const autoApproved = new Set<string>()
+   createEffect(() => {
+@@ -903,6 +914,39 @@ export function Session(props: {
+   ]
+ 
+   const baseCommands = createMemo(() => [
++    {
++      title: "Auto-compaction: on, off, or status",
++      id: "session.autocompact",
++      group: "Session",
++      slash: { name: "autocompact", arguments: true as const },
++      run: async (input?: string) => {
++        const value = (input ?? "").trim().toLowerCase()
++        if (value !== "" && value !== "status" && value !== "on" && value !== "off") {
++          toast.show({ message: "Usage: /autocompact on|off|status", variant: "warning" })
++          return
++        }
++        try {
++          const current = await client.api.session.get({ sessionID: route.sessionID })
++          if (value === "on" || value === "off") {
++            await client.api.session.update({
++              sessionID: route.sessionID,
++              metadata: { ...current.metadata, sarnessAutoCompact: value === "on" },
++            })
++            toast.show({
++              message: value === "on"
++                ? "Auto-compaction: ON — automatic context management enabled"
++                : "Auto-compaction: OFF — manual /compact available",
++              variant: "success",
++            })
++            return
++          }
++          const state = current.metadata?.sarnessAutoCompact === true ? "ON" : "OFF"
++          toast.show({ message: `Auto-compaction: ${state} (current session)${value === "" ? " — /autocompact on|off|status" : ""}`, variant: "info" })
++        } catch (error) {
++          toast.error(error)
++        }
++      },
++    },
+     {
+       title: "Rename session",
+       id: "session.rename",
+diff --git a/packages/tui/src/util/session.ts b/packages/tui/src/util/session.ts
+index c7213e2..40dfb14 100644
+--- a/packages/tui/src/util/session.ts
++++ b/packages/tui/src/util/session.ts
+@@ -54,9 +54,13 @@ export function contextUsage(
+     last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+   if (tokens <= 0) return
+   const model = models?.find((model) => model.providerID === last.model.providerID && model.id === last.model.id)
++  const usable = model?.limit.context
++    ? Math.max(1, model.limit.context - Math.min(model.limit.output || 0, Math.floor(model.limit.context / 4)))
++    : undefined
+   return {
+     tokens,
+     percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : undefined,
++    usablePercent: usable ? Math.round((tokens / usable) * 100) : undefined,
+   }
+ }
+ 
+-- 
+2.53.0
+

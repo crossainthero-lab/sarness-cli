@@ -251,6 +251,16 @@ terminal.
   everything.
 * **Sarness commands:** `/cabinet` opens the model cabinet (the terminal pauses while it runs). `/upgrade` points to
   `sarness upgrade`. `/connect` explains that models come only from Sarness Engine.
+* **Context:** `/autocompact on`, `/autocompact off`, and `/autocompact status` control automatic
+  compaction for the current session; the choice survives resume and restart. A session that never chose follows the
+  `autocompact` setting (default `on`; `sarness config set autocompact off` for the other way). `/compact` remains
+  available for manual compaction. When automatic compaction is off, the context indicator warns as the reported
+  model limit approaches; an unknown limit cannot be used for automatic compaction.
+* **Staying on task:** a run that was told what to do does not stop to ask permission it already has, does not
+  forget what it did when the context is compacted, does not repeat finished work, and does not report progress it
+  cannot show. A ledger of what tool calls really did is kept outside the conversation and handed back after each
+  compaction; the terminal's own approval prompts are never bypassed. Same behaviour in `sarness native`. Design,
+  evidence and limits: [docs/GUARD.md](docs/GUARD.md).
 * Only the loaded model is offered, with its live ctx/gpu_layers pinned: the bridge never reloads or swaps a model
   behind other users. Ctrl+C belongs to the terminal (the launcher does not die on it).
 

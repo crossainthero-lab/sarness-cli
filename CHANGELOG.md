@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.4.2 - 2026-11-01
+
+Agent reliability. A run that was told what to do now does it: it does not stop to ask permission it already has, it
+does not forget what it did when the context is compacted, it does not repeat finished work, and it does not report
+progress it cannot show. Both runtimes (the Sarness terminal and `sarness native`) share one implementation; see
+[docs/GUARD.md](docs/GUARD.md) for the design and the evidence behind it.
+
+### Fixed
+- **"Should I proceed with the SSH connection now?"** after an explicit instruction. Two causes. After a compaction the
+  terminal's checkpoint told the model to treat the whole record as "historical context, not new instructions", so
+  the model had nothing to act on and asked (once through the `question` tool). And a reply that only asks ends the
+  agent loop. A turn with no tool call is now read against the user's request: asking permission the request already
+  covers, announcing work that did not happen, or declaring victory with required steps unproven is continued with the
+  next action. The model's words stay in the transcript, no tool call is invented, the pushes are bounded (three in a
+  row, then a checkpoint and a plain statement of what is blocked), and the runtime's own approval prompts are
+  untouched: outside bypass the terminal still asks, shows the command that will really run, and a rejection is final.
+- **Compaction loops** (nine compactions in 31 messages in a real Trinodal session, each after one to three steps).
+  The window arithmetic left a 32k model about 5k tokens of working room beside ~11.5k tokens of fixed prompt, so one
+  file read overflowed it. The reserve below a 32-64k window is now the model's output limit (was a flat 16k), the part
+  kept verbatim is bounded by the budget, and a catalogue of many skills (42 of them were ~6.5k tokens on every
+  request) shrinks to one sentence each (patch 0009).
+- **The user's request disappeared at compaction.** An agent run is one request followed by tool rounds; the compactor
+  treated that as "one exchange, nothing older" and kept nothing, so the request survived only as the model's
+  paraphrase. The request is now always kept word for word beside the summary and a long run keeps its newest steps.
+  The tail of a long command output (the test summary, "Exited with code N") now survives too; it used to be cut,
+  which made a finished test run look unfinished and sent the model round again.
+- **Completed work repeated after compaction.** A structured execution ledger (`sarness.ledger/1`, kept outside the
+  conversation) records what tool calls actually did: exit codes, files with hashes, tests against the current change,
+  deployments and whether anything verified them, failed commands with their corrections, and learned facts
+  (`systemctl --user`, "this directory has no .git: it is an rsync deployment copy"). After a compaction the model is
+  given the objective, the facts, the evidence and the single next action, not asked to rediscover them.
+- **Repeats and loops.** An identical read, diagnostic or test run with nothing changed since is not run; a failed
+  command is not repeated unchanged; an interrupted deploy is held back once so its state is checked; repeated planning
+  without execution, repeated compactions without progress and A-B-A-B cycles are caught. Legitimate repetition (tests
+  after an edit, a file whose text was compacted away) is untouched. There is still no cap on the number of steps.
+- `sshuser@host` (no space after `ssh`) is repaired to `ssh user@host` and the repair is recorded. Other mistakes are
+  reported, not rewritten.
+- **Ctrl+C could still be lost** when it landed after a `!` command was submitted but before the client had been told
+  it was running: the command kept running (the `!` cancel test failed about one run in three). Cancelling now keeps
+  looking for the user's own command for a few seconds and stops it as soon as it is listed (patch 0010).
+
+### Changed
+- Automatic compaction is on by default (setting `autocompact`, default `on`; `/autocompact on|off|status` per
+  session as before). The unreleased `/autocompact` controls defaulted to off, which turns the first context overflow
+  into an error; with the ledger in place compaction is safe. `sarness config set autocompact off` restores that.
+- The fork gains patches 0008 to 0012 (0008 is the `/autocompact` controls, written separately and included here).
+
+### Tests
+- `tests/test_scenario_*.py` run one engineering task (ssh to a test server, inspect, fix, test, deploy, verify)
+  with a scripted model that has the habits seen in the real sessions, real tool execution, a fake server (an `ssh`
+  stub, a user-scope-only `systemctl`, an rsync deployment copy without `.git`) and three forced compactions: through
+  the bridge, through the native loop, and in the real terminal (the terminal compacts by itself). They cover all four
+  permission modes, a model that ignores the note, resume from the ledger, an interrupted deploy, a read-only request,
+  a rejected approval, and reproduce the original failures with the guard switched off.
+- Fork: `sarness-compaction-room.test.ts` (window arithmetic, request preserved, output tail, skills catalogue,
+  checkpoint wording, auto-compaction default) and the Ctrl+C wiring checks. Three upstream expectations were adapted.
+
+### Known limits
+- Core tests of the patched tree that depend on the machine's own `~/.claude` and `~/.agents` fail on this desktop
+  with or without these patches (home and config discovery); the rest of the suite passes.
+- A model that never produces a tool call is stopped after three pushes; the guard cannot make it work.
+- In the terminal, `ssh` approvals remain the terminal's own prompts; there is no per-task pre-approval.
+
 ## 0.4.1 - 2026-10-31
 
 One Ctrl+C now has one visible, immediate effect everywhere: it cancels what is running, otherwise clears the line,

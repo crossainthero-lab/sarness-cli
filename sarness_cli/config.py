@@ -64,11 +64,13 @@ DEFAULTS: dict[str, Any] = {
     "log_level": "basic",        # off | basic | verbose
     "session_dir": None,
     "runtime": "tui",            # tui (the Sarness terminal, forked OpenCode) | native (Python REPL); "opencode" = tui
+    "autocompact": "on",         # default for sessions that never ran /autocompact; the execution ledger makes it safe
 }
 # Setting -> (validator description, check)
 _CHECKS = {
     "effort": lambda v: v in EFFORTS,
     "runtime": lambda v: v in ("tui", "native", "opencode"),
+    "autocompact": lambda v: v in ("on", "off"),
     "thinking": lambda v: v in THINKING,
     "permissions": lambda v: v in SAVEABLE_MODES,
     "log_level": lambda v: v in ("off", "basic", "verbose"),
