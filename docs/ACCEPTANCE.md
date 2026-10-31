@@ -44,7 +44,7 @@ waited until the Engine had no stream from anyone else and enough free memory (t
 | over `ssh -tt` with a fake engine (idle, generation, shell command, startup) | | 14/14, nothing left on the Spark |
 | real Engine: startup Ctrl+C at 0.4-5 s through the launcher and SSH tunnel | 5/5, no tunnel master left | |
 | real Engine: `sarness` shows model, effort, server, permissions; no OpenCode welcome | yes | yes |
-| real Engine: `/cabinet` opens and one Ctrl+C returns | covered by the hermetic run | yes |
+| `/cabinet` opens and one Ctrl+C returns to the terminal | checked by hand against a fake engine | yes (real Engine; nothing was selected) |
 | real agent task: wrote `calc.py` and `test_calc.py`, ran the test | | yes (test printed PASS) |
 | real generation, one Ctrl+C: stream released, app stays at the prompt | released in 4.2 s | released in 0.3-1.8 s |
 | session continues after the cancel (a reversed-word question the prompt cannot contain) | yes | yes |
