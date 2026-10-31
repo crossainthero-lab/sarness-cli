@@ -130,6 +130,22 @@ class Guard:
         return render.render(led, budget=budget, mode=self.mode, recovery=recovery, compacted=True)
 
     # ------------------------------------------------------------------ reviewing a model turn
+    @staticmethod
+    def visible_fingerprints(messages: list[dict[str, Any]] | None) -> set[str] | None:
+        """Fingerprints of the finished tool calls whose results are still in the history the model sees."""
+        if messages is None:
+            return None
+        pending: dict[str, str] = {}
+        out: set[str] = set()
+        for m in messages:
+            if m.get("role") == "assistant":
+                for c in m.get("tool_calls") or []:
+                    name, args = parse_call(c)
+                    pending[str(c.get("id"))] = fingerprint(name, args)
+            elif m.get("role") == "tool" and str(m.get("tool_call_id")) in pending:
+                out.add(pending[str(m.get("tool_call_id"))])
+        return out
+
     def review(self, *, text: str, calls: list[dict[str, Any]], messages: list[dict[str, Any]] | None = None) -> Verdict:
         if messages is not None and self.utility_kind(messages):
             return Verdict()
@@ -138,7 +154,7 @@ class Guard:
             return self._give_up("compaction-loop", "the context was compacted repeatedly without any new progress")
         if not calls:
             return self._review_text(text)
-        return self._review_calls(text, calls)
+        return self._review_calls(text, calls, self.visible_fingerprints(messages))
 
     def _review_text(self, text: str) -> Verdict:
         led = self.led
@@ -167,7 +183,7 @@ class Guard:
         led.save()
         return Verdict("continue", reading.kind, render.nudge_text(reading.kind, led, mode=self.mode), detail=reading.reason)
 
-    def _review_calls(self, text: str, calls: list[dict[str, Any]]) -> Verdict:
+    def _review_calls(self, text: str, calls: list[dict[str, Any]], visible: set[str] | None = None) -> Verdict:
         led = self.led
         led.counter("nudges", reset=True)
         led.counter("premature", reset=True)
@@ -218,7 +234,7 @@ class Guard:
                     f"; the verified correction is `{known['remedy']}`" if known.get("remedy") else "")
                 dropped.append(("known-failure", fix, fp))
                 continue
-            rep = led.find_repeat(name, args)
+            rep = led.find_repeat(name, args, visible)
             if rep is None and cyc and fp == cyc[0]:
                 rep = next((o for o in reversed(led.d["ops"]) if o["fp"] == fp), None)
             if rep is not None:
@@ -237,6 +253,8 @@ class Guard:
                                 "inspect the state first", fp))
                 continue
             kept.append(c)
+        if kept and any(led.is_new_work(*parse_call(c)) for c in kept):
+            led.reset_repeat_counters()        # genuine new work: earlier refusals no longer count against the model
         for kind, detail, _ in dropped:
             led.intervene(kind, detail)
             self.events.append({"kind": kind, "detail": detail[:100]})

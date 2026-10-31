@@ -653,7 +653,8 @@ def cmd_opencode(a: argparse.Namespace) -> int:
             args = ["run", "-m", f"sarness/{selected['ref']}", *extra, task]
         try:
             return launch_opencode(engine, models, selected["ref"], workspace, mode=mode, effort=effort, live=status,
-                                   args=args, tui_args=extra if not task else None, server=name)
+                                   args=args, tui_args=extra if not task else None, server=name,
+                                   autocompact=settings.get("autocompact") or "on")
         except (RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise ConfigError(f"Cannot start the Sarness terminal: {exc}") from exc
     finally:

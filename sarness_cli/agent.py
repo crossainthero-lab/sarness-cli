@@ -719,7 +719,7 @@ class Session:
 
             # ---- guard: refuse established repeats and malformed commands before anything runs
             skipped: dict[str, str] = {}
-            verdict = self.guard.review(text=content, calls=[c for c, _, _ in parsed])
+            verdict = self.guard.review(text=content, calls=[c for c, _, _ in parsed], messages=view)
             if verdict.action == "give_up":
                 self.messages.append({"role": "assistant", "content": content})
                 self.status = GUARD_STATUS.get(verdict.kind, "blocked:guard")

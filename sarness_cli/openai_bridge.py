@@ -313,7 +313,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _guard_prepare(self, messages: list[dict[str, Any]]) -> tuple[Guard | None, list[dict[str, Any]]]:
         """Feed the session's ledger from this request and, after a compaction, append the verified task state so the
         model keeps its objective, findings and next action. Title and summary requests are left alone."""
-        if not self.server.guard_enabled or Guard.utility_kind(messages):
+        if not self.server.guard_enabled:
+            return None, messages
+        utility = Guard.utility_kind(messages)
+        if utility == "title":
             return None, messages
         session = (self.headers.get("x-opencode-session-id") or self.headers.get("x-opencode-session")
                    or self.headers.get("x-session-id") or "")
@@ -324,7 +327,9 @@ class _Handler(BaseHTTPRequestHandler):
         with lock:
             if parent and parent != session:
                 guard.led.d["parent"] = parent
-            guard.observe(messages)
+            guard.observe(messages)           # a summary request carries the whole history about to be replaced: last chance to see it
+            if utility:
+                return None, messages
             note = guard.note(messages, budget=3200)
         if note:
             messages = messages + [{"role": "user", "content": note}]
@@ -598,7 +603,8 @@ def opencode_binary() -> str:
 
 
 def opencode_env(cfg: dict[str, Any], workspace: Path, config_dir: Path | None = None, *,
-                 server: str | None = None, mode: str | None = None, effort: str | None = None) -> dict[str, str]:
+                 server: str | None = None, mode: str | None = None, effort: str | None = None,
+                 autocompact: str = "on") -> dict[str, str]:
     env = os.environ.copy()
     # Display facts for the terminal's info line and delegated commands; enforcement stays in cfg and the bridge.
     env.update({"SARNESS_TUI": "1", "SARNESS_VERSION": __version__, "SARNESS_BIN": tui.sarness_executable()})
@@ -608,6 +614,7 @@ def opencode_env(cfg: dict[str, Any], workspace: Path, config_dir: Path | None =
         env["SARNESS_MODE"] = mode
     if effort:
         env["SARNESS_EFFORT"] = effort
+    env["SARNESS_AUTOCOMPACT_DEFAULT"] = "off" if autocompact == "off" else "on"   # sessions that never ran /autocompact
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(cfg)
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
@@ -703,7 +710,7 @@ def run_foreground(cmd: list[str], *, stop_grace: float = 5.0, **kw: Any) -> int
 def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, workspace: Path, *,
                     mode: str = "auto", effort: str = "medium", live: dict[str, Any] | None = None,
                     args: list[str] | None = None, tui_args: list[str] | None = None,
-                    config_dir: Path | None = None, server: str | None = None) -> int:
+                    config_dir: Path | None = None, server: str | None = None, autocompact: str = "on") -> int:
     """Run OpenCode against a temporary, authenticated, loopback-only bridge. `args` go to OpenCode
     (e.g. ["run", "--format", "json", "task"]); the default is the interactive TUI in `workspace`."""
     binary = opencode_binary()
@@ -716,7 +723,8 @@ def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, wo
         cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode),
                               effort=effort)
         return run_foreground(opencode_command(binary, workspace, mode, args, tui_args), cwd=workspace,
-                              env=opencode_env(cfg, workspace, config_dir, server=server, mode=mode, effort=effort))
+                              env=opencode_env(cfg, workspace, config_dir, server=server, mode=mode, effort=effort,
+                                         autocompact=autocompact))
     finally:
         bridge.shutdown()
         bridge.server_close()

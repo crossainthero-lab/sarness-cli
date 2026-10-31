@@ -236,3 +236,15 @@ def test_a_read_after_an_edit_in_the_same_turn_is_not_a_repeat():
                                  call("shell", {"command": "cat after.txt"})])
     assert v.action == "pass"
     assert g.review(text="", calls=[call("shell", {"command": "cat after.txt"})]).action == "retry"
+
+
+def test_a_file_read_whose_result_was_compacted_away_may_be_read_again_but_a_visible_one_may_not():
+    first = read("/w/app.py")
+    g, msgs = make(turns=[first])
+    again = call("read", {"path": "/w/app.py"})
+    assert g.review(text="", calls=[again], messages=msgs).action == "retry", "the result is still in the model's context"
+    compacted = [system(), user(TASK), checkpoint("summary")]
+    assert g.review(text="", calls=[again], messages=compacted).action == "pass", "the text was compacted away; the model needs it to edit"
+    shell_call = call("shell", {"command": "ssh fylume@192.168.20.193 'git status'"})
+    g2, _ = make(turns=[shell("ssh fylume@192.168.20.193 'git status'", "fatal: not a git repository", code=128)])
+    assert g2.review(text="", calls=[shell_call], messages=compacted).action in {"retry", "pass"}

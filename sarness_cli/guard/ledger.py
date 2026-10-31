@@ -257,6 +257,9 @@ class Ledger:
                     continue
                 seen.add(sid)
                 self.d["seen"].append(sid)
+                if text.lstrip().startswith(("NOT EXECUTED", "DENIED:")):
+                    self.counter("not_executed", 1)        # refused or denied: it did not run, so it is not evidence of anything
+                    continue
                 op = self.record(name, args, text)
                 if op:
                     new_ops.append(op)
@@ -534,10 +537,14 @@ class Ledger:
         return n
 
     # ------------------------------------------------------------------ repeats
-    def find_repeat(self, tool: str, args: dict[str, Any]) -> dict | None:
+    def find_repeat(self, tool: str, args: dict[str, Any], visible: set[str] | None = None) -> dict | None:
         """The earlier op this call would repeat for no reason, if any: an identical read-only/diagnostic call whose
-        result cannot have changed (no source change, deploy or other mutation since), or a test run with nothing new."""
+        result cannot have changed (no source change, deploy or other mutation since), or a test run with nothing new.
+        `visible` is the set of call fingerprints whose results the model can still see; re-reading a file or search
+        whose result was compacted away is legitimate (the model needs the text to work on it), so those are not repeats."""
         fp = fingerprint(tool, args)
+        if visible is not None and tool in READ_TOOLS and fp not in visible:
+            return None
         kind = "other"
         if tool in SHELL_TOOLS:
             kind = C.classify(str(args.get("command") or "")).kind
@@ -566,6 +573,15 @@ class Ledger:
 
     def repeat_count(self, fp: str, delta: int = 0) -> int:
         return self.counter("repeat:" + fp, delta)
+
+    def reset_repeat_counters(self) -> None:
+        """Real new work happened: the refusal budgets of earlier repeated proposals start again."""
+        c = self.d["counters"]
+        for k in [k for k in c if k.startswith(("repeat:", "scope:", "uncertain:", "plan-streak"))]:
+            del c[k]
+
+    def is_new_work(self, tool: str, args: dict[str, Any]) -> bool:
+        return fingerprint(tool, args) not in self.d["fp_index"]
 
     def known_failure(self, tool: str, args: dict[str, Any]) -> dict | None:
         if tool not in SHELL_TOOLS:

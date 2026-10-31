@@ -10,7 +10,9 @@ from dataclasses import asdict, dataclass, field
 
 # Messages that sit in the user role but were not typed by the user.
 SYNTHETIC_PREFIXES = ("[sarness]", "<conversation-checkpoint>", "<system-reminder>", "The following shell command was executed",
-                      "The server restarted while you were working", "<summary>", "[sarness-guard]")
+                      "The server restarted while you were working", "<summary>", "[sarness-guard]",
+                      "You MUST summarize the conversation above", "Update the existing checkpoint in the conversation above",
+                      "The previous response did not fill in the required summary template")
 
 ACTION_WORDS: dict[str, re.Pattern[str]] = {
     "ssh": re.compile(r"(?i)\b(?:ssh|log\s*(?:in)?to|connect(?:ing)?\s+to|remote(?:ly)?|on\s+(?:the|my)\s+(?:server|spark|box|host|machine))\b"),

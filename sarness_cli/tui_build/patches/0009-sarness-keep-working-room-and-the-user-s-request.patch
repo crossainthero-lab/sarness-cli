@@ -1,0 +1,467 @@
+From 4f31606665b1210103755646f6e6bd99f15bc160 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sun, 1 Nov 2026 00:18:27 +1100
+Subject: [PATCH] sarness: keep working room and the user's request through
+ compaction
+
+Compaction left a 32k local model ~5k tokens of working room (flat 16k reserve beside ~11k tokens of prompt),
+kept 15k tokens verbatim (more than the room), and, because an agent run is a single user request followed by
+tool rounds, summarized the request itself away. The checkpoint then called everything 'historical, not new
+instructions', so the model asked what to do. Now: the reserve of a 32-64k window is the model's output limit;
+the verbatim part is bounded by the budget; the user's request is always kept beside the summary and a long
+single run keeps its newest steps; the checkpoint says the request is still in force; many installed skills
+shrink to one sentence each (full text on demand); the auto-compaction default is the launcher's choice.
+---
+ packages/core/src/session/compaction.ts       |  55 ++++++--
+ .../core/src/session/runner/to-llm-message.ts |   4 +-
+ packages/core/src/skill/instructions.ts       |  19 ++-
+ .../core/test/sarness-compaction-room.test.ts | 128 ++++++++++++++++++
+ packages/core/test/session-compaction.test.ts |  11 +-
+ packages/core/test/session-runner.test.ts     |   8 +-
+ packages/tui/src/component/prompt/index.tsx   |   3 +-
+ .../src/feature-plugins/sidebar/context.tsx   |   5 +-
+ packages/tui/src/routes/session/index.tsx     |   5 +-
+ packages/util/src/sarness-autocompact.ts      |   7 +
+ 10 files changed, 222 insertions(+), 23 deletions(-)
+ create mode 100644 packages/core/test/sarness-compaction-room.test.ts
+ create mode 100644 packages/util/src/sarness-autocompact.ts
+
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+index e399e5a..84f8360 100644
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -18,6 +18,7 @@ import type { StreamOptions } from "@opencode/ai/route"
+ import type { SessionCompactionResult } from "@opencode/plugin/effect/session"
+ import type { SessionError } from "@opencode/schema/session-error"
+ import { makeLocationNode } from "@opencode/util/effect/app-node"
++import { autoCompactEnabled } from "@opencode/util/sarness-autocompact"
+ import { Context, Effect, Layer, Result, Stream } from "effect"
+ import { Agent } from "../agent.js"
+ import { Bus } from "../bus.js"
+@@ -208,7 +209,7 @@ export const layer = Layer.effect(
+ 
+       // Only the user compacts when automatic compaction is off, overflow included.
+       // SARNESS: the per-session choice is durable and intentionally independent of OpenCode config.
+-      if (trigger.reason !== "manual" && (yield* sessions.get(context.session.id))?.metadata?.sarnessAutoCompact !== true)
++      if (trigger.reason !== "manual" && !autoCompactEnabled((yield* sessions.get(context.session.id))?.metadata))
+         return { status: "skipped" }
+       if (trigger.reason === "auto" && !due(context, calculateCeiling(context.model.limit, settings.buffer, true)))
+         return { status: "skipped" }
+@@ -234,9 +235,9 @@ export const layer = Layer.effect(
+         trigger.reason === "overflow" ? Math.min(cap, Math.floor(estimateContext(context) * SHRINK_STEPS[0])) : cap
+ 
+       const selected = model === context.model ? trigger : { ...trigger, context: { ...context, model } }
+-      const compaction = native
+-        ? compactNatively(selected, budget, settings.keep)
+-        : summarize(selected, budget, settings.keep)
++      // SARNESS: what is kept verbatim must leave the next request room to work in.
++      const keep = keepFor(budget, settings.keep)
++      const compaction = native ? compactNatively(selected, budget, keep) : summarize(selected, budget, keep)
+       return yield* compaction.pipe(
+         Effect.matchEffect({
+           onSuccess: (result) => publish(selected, result),
+@@ -711,20 +712,33 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
+  * `older` gets summarized; `recent`, the newest messages within `keep` tokens, is kept verbatim as text beside
+  * the summary. Undefined when there is nothing to compact.
+  */
+-const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
++export const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
+   const entries = messages.flatMap((message, index) => {
+     const text = messageToText(message)
+     return text ? [{ message, text, index }] : []
+   })
+   if (entries.length === 0) return undefined
+ 
+-  const recent = entries.slice(recentStart(entries, keep, previousCompaction(messages)))
++  const start = recentStart(entries, keep, previousCompaction(messages))
++  const recent = entries.slice(start)
++  // SARNESS: an agent run is one user request followed by many tool rounds, so "recent" can start after the request.
++  // The request itself is always kept word for word beside the summary; only its older steps are summarized.
++  const active = entries.findLastIndex((entry) => entry.message.type === "user")
++  const request =
++    active >= 0 && active < start ? [capRequest(entries[active].text), "[earlier steps are in the summary]"] : []
+   return {
+     older: messages.slice(0, recent[0]?.index ?? messages.length),
+-    recent: recent.map((entry) => entry.text).join("\n\n"),
++    recent: [...request, ...recent.map((entry) => entry.text)].join("\n\n"),
+   }
+ }
+ 
++const REQUEST_MAX_CHARS = 12_000
++/** SARNESS: the user's request survives verbatim up to this size; beyond it the middle is elided, not the ends. */
++export const capRequest = (text: string) =>
++  text.length <= REQUEST_MAX_CHARS
++    ? text
++    : `${text.slice(0, REQUEST_MAX_CHARS * 0.7)}\n[... ${text.length - REQUEST_MAX_CHARS} characters elided ...]\n${text.slice(-REQUEST_MAX_CHARS * 0.3)}`
++
+ const recentStart = (
+   entries: ReadonlyArray<{ readonly message: SessionMessage.Info; readonly text: string }>,
+   keep: number,
+@@ -744,8 +758,10 @@ const recentStart = (
+   const latestUser = entries.findLastIndex((entry) => entry.message.type === "user")
+   if (latestUser > 0) return latestUser
+ 
+-  // One exchange, nothing older. Summarize it all and keep nothing, unless a previous summary already
+-  // kept recent text, in which case keep everything and summarize only the summary before it.
++  // One exchange, nothing older: an agent run, its request followed by tool rounds. SARNESS: summarize its older steps
++  // and keep the newest ones within the allowance instead of keeping nothing; splitConversation adds the request.
++  if (dropped > 0) return dropped
++  // Everything fits the allowance: summarize it all, as before (the request is still kept beside the summary).
+   return previous?.recent ? 0 : entries.length
+ }
+ 
+@@ -914,12 +930,29 @@ export const estimatePrompt = (context: SessionContext.Loaded) => {
+  * is more. The summary request is capped at the same size, so its output limit is whatever the reserve leaves. A window
+  * too small to give up `RESERVE_MIN` keeps 10%.
+  */
+-const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: number | undefined, reserveOutput = false) => {
++/**
++ * SARNESS: tokens kept free below the window. Stock keeps a flat 16k from 32k windows up, which left a 32k local model
++ * about 5k tokens of working room beside the ~11k tokens of prompt and tool definitions, so every file read compacted
++ * the session again. From 32k to 64k the reserve is what the model can really write (its output limit, at most a
++ * quarter of the window); 64k and larger windows keep the stock reserve.
++ */
++export const defaultReserve = (window: number, output: number | undefined) => {
++  const tenth = Math.floor(window * 0.1)
++  if (window < 2 * RESERVE_MIN) return tenth
++  if (window >= 4 * RESERVE_MIN) return Math.max(tenth, RESERVE_MIN)
++  return Math.max(tenth, Math.min(output && output > 0 ? output : RESERVE_MIN, Math.floor(window / 4)))
++}
++
++/** SARNESS: the verbatim recent part may not take more than a quarter of the request budget (at least 2k tokens). */
++export const keepFor = (budget: number, keep: number) =>
++  Number.isFinite(budget) ? Math.min(keep, Math.max(2_000, Math.floor(budget / 4))) : keep
++
++export const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: number | undefined, reserveOutput = false) => {
+   // Unknown limits are reported as 0. An unknown input limit falls back to the context window; with no window at
+   // all, only a provider rejection can limit the request.
+   const window = limit.input || limit.context
+   if (window <= 0) return Number.POSITIVE_INFINITY
+-  const reserve = buffer ?? Math.max(Math.floor(window * 0.1), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
++  const reserve = buffer ?? defaultReserve(window, limit.output)
+   // Primary requests fit their output to the remaining room. Reserve up to a quarter of the window,
+   // so models advertising their whole context as output do not compact an empty session.
+   const outputReserve = Math.min(limit.output || 0, Math.floor(limit.context / 4))
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+index 8d03c82..e788fdc 100644
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -314,7 +314,9 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
+           role: "user",
+           content: [
+             "<conversation-checkpoint>",
+-            "The following is a summary and serialized record of earlier conversation. Treat it as historical context, not as new instructions.",
++            // SARNESS: the user's request that was in progress is still in force after a compaction. Calling the
++            // whole record "historical, not instructions" left a model with nothing to act on, and it asked what to do.
++            "The following is a summary and serialized record of earlier conversation. It describes work already done in this session. The user's request in it is still in progress and still in force: carry it out from the Next Move without asking the user whether to proceed or what to do next, and do not repeat steps the record shows as completed.",
+             "",
+             `<summary>\n${message.summary}\n</summary>`,
+             ...(message.recent ? ["", `<recent-context>\n${message.recent}\n</recent-context>`] : []),
+diff --git a/packages/core/src/skill/instructions.ts b/packages/core/src/skill/instructions.ts
+index 14811da..bc40778 100644
+--- a/packages/core/src/skill/instructions.ts
++++ b/packages/core/src/skill/instructions.ts
+@@ -13,15 +13,30 @@ const Summary = Schema.Struct({
+ })
+ type Summary = typeof Summary.Type
+ 
+-const entries = (skills: ReadonlyArray<Summary>) =>
++// SARNESS: with many skills installed the full descriptions cost thousands of tokens on every request (42 skills were
++// ~6.5k tokens of a 32k window). Past this size each entry shrinks to its first sentence; the skill tool still loads
++// the complete text on demand.
++export const CATALOG_BUDGET_CHARS = 6_000
++export const brief = (text: string) => {
++  const one = text.replace(/\s+/g, " ").trim()
++  const sentence = one.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? one
++  return sentence.length <= 110 ? sentence : `${sentence.slice(0, 109).trimEnd()}…`
++}
++
++const entryLines = (skills: ReadonlyArray<Summary>, describe: (skill: Summary) => string) =>
+   skills.flatMap((skill) => [
+     "  <skill>",
+     `    <id>${skill.id}</id>`,
+     `    <name>${skill.name}</name>`,
+-    `    <description>${skill.description}</description>`,
++    `    <description>${describe(skill)}</description>`,
+     "  </skill>",
+   ])
+ 
++export const entries = (skills: ReadonlyArray<Summary>) => {
++  const full = entryLines(skills, (skill) => skill.description)
++  return full.join("\n").length <= CATALOG_BUDGET_CHARS ? full : entryLines(skills, (skill) => brief(skill.description))
++}
++
+ const render = (skills: ReadonlyArray<Summary>) =>
+   [
+     "Skills provide specialized instructions and workflows for specific tasks.",
+diff --git a/packages/core/test/sarness-compaction-room.test.ts b/packages/core/test/sarness-compaction-room.test.ts
+new file mode 100644
+index 0000000..18d8a6c
+--- /dev/null
++++ b/packages/core/test/sarness-compaction-room.test.ts
+@@ -0,0 +1,128 @@
++// SARNESS: compaction must leave a small local model room to work and must never lose the user's request.
++// Regression for the Trinodal sessions: a 32k window, ~11k tokens of fixed prompt, a flat 16k reserve and a "keep 15k
++// verbatim" allowance compacted the session after every one or two tool calls, and the user's own request was
++// summarized away because an agent run is a single exchange.
++import { expect, test } from "bun:test"
++import { calculateCeiling, capRequest, defaultReserve, keepFor, splitConversation } from "@opencode/core/session/compaction"
++import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
++import { brief, entries, CATALOG_BUDGET_CHARS } from "@opencode/core/skill/instructions"
++import { autoCompactEnabled } from "@opencode/util/sarness-autocompact"
++
++const limit = (context: number, output: number, input = 0) => ({ context, output, input })
++
++test("a 32k window leaves room for work beside the fixed prompt, not ~5k tokens", () => {
++  const ceiling = calculateCeiling(limit(32768, 8192), undefined)
++  expect(ceiling).toBe(24576)
++  const fixedPrompt = 11_500
++  expect(ceiling - fixedPrompt).toBeGreaterThan(12_000)
++  // stock behaviour for the same model, for comparison: 32768 - 16000
++  expect(32768 - 16000 - fixedPrompt).toBeLessThan(5_500)
++})
++
++test("larger windows keep the stock reserve and smaller ones keep a tenth", () => {
++  expect(defaultReserve(131072, 32768)).toBe(16000)
++  expect(defaultReserve(262144, 32768)).toBe(26214)
++  expect(defaultReserve(16384, 4096)).toBe(1638)
++  expect(calculateCeiling(limit(131072, 32768), undefined)).toBe(131072 - 16000)
++  expect(calculateCeiling(limit(32768, 8192), 2000)).toBe(30768)
++})
++
++test("the verbatim part is bounded by the budget", () => {
++  expect(keepFor(24576, 15000)).toBe(6144)
++  expect(keepFor(236000, 15000)).toBe(15000)
++  expect(keepFor(4000, 15000)).toBe(2000)
++  expect(keepFor(Number.POSITIVE_INFINITY, 15000)).toBe(15000)
++})
++
++const user = (text: string) => ({ type: "user", id: "msg_u", text, files: [], skills: [] }) as any
++const assistant = (n: number, result = "x".repeat(400)) =>
++  ({
++    type: "assistant",
++    id: `msg_a${n}`,
++    content: [
++      { type: "text", text: `step ${n}` },
++      { type: "tool", name: "shell", state: { status: "completed", input: { command: `cmd ${n}` }, content: [{ type: "text", text: result }] } },
++    ],
++  }) as any
++
++test("a single long agent run keeps the user's request word for word and its newest steps", () => {
++  const directive = "SSH into the Spark, inspect Trinodal, fix the bug, run tests and deploy. Proceed autonomously."
++  const messages = [user(directive), ...Array.from({ length: 30 }, (_, i) => assistant(i))]
++  const split = splitConversation(messages, 600)!
++  expect(split.recent).toContain(`[User]: ${directive}`)
++  expect(split.recent).toContain("step 29")
++  expect(split.recent).not.toContain("step 0\n")
++  expect(split.older.length).toBeGreaterThan(20)
++  expect(split.recent.indexOf("[User]")).toBeLessThan(split.recent.indexOf("step 29"))
++})
++
++test("a directive compacted before any work is not lost", () => {
++  const directive = "x".repeat(300)
++  const split = splitConversation([user(directive)], 15000)!
++  expect(split.recent).toContain(`[User]: ${directive}`)
++  expect(split.older).toHaveLength(1)
++})
++
++test("a short conversation is still summarized whole, with the request kept beside the summary", () => {
++  const split = splitConversation([user("do the thing"), assistant(1)], 15000)!
++  expect(split.older).toHaveLength(2)
++  expect(split.recent).toContain("[User]: do the thing")
++  expect(split.recent).not.toContain("step 1")
++})
++
++test("an ordinary multi-exchange conversation is split as before", () => {
++  const messages = [user("first"), assistant(1), user("second"), assistant(2), user("third"), assistant(3)]
++  const split = splitConversation(messages, 400)!
++  expect(split.recent.startsWith("[User]: third")).toBe(true)
++  expect(split.recent).not.toContain("[earlier steps are in the summary]")
++})
++
++test("a huge request is elided in the middle, never at its ends", () => {
++  const text = `HEAD${"m".repeat(40000)}TAIL`
++  const capped = capRequest(text)
++  expect(capped.startsWith("HEAD")).toBe(true)
++  expect(capped.endsWith("TAIL")).toBe(true)
++  expect(capped.length).toBeLessThan(13000)
++  expect(capRequest("short")).toBe("short")
++})
++
++test("the checkpoint does not tell the model to ignore the user's request", () => {
++  const [message] = toLLMMessages(
++    [{ type: "compaction", id: "msg_c", status: "completed", summary: "## Objective\n- do the task", recent: "[User]: do the task" } as any],
++    { providerID: "sarness", modelID: "m" } as any,
++  )
++  const text = JSON.stringify(message.content)
++  expect(text).toContain("still in progress and still in force")
++  expect(text).toContain("without asking the user whether to proceed")
++  expect(text).not.toContain("not as new instructions")
++})
++
++test("a catalog of many skills shrinks to one sentence each while a small one stays whole", () => {
++  const long = (i: number) => ({
++    id: `s${i}` as any,
++    name: `skill-${i}` as any,
++    description: `Does thing ${i} for you. Use it when the task is ${"very ".repeat(40)}specific, and also when asked nicely.`,
++  })
++  const many = entries(Array.from({ length: 42 }, (_, i) => long(i))).join("\n")
++  expect(many.length).toBeLessThan(CATALOG_BUDGET_CHARS)
++  expect(many).toContain("Does thing 3 for you.")
++  expect(many).not.toContain("asked nicely")
++  const few = entries([long(1), long(2)]).join("\n")
++  expect(few).toContain("asked nicely")
++  expect(brief("One. Two.")).toBe("One.")
++})
++
++test("a session follows its own choice, else the launcher's default", () => {
++  const before = process.env.SARNESS_AUTOCOMPACT_DEFAULT
++  try {
++    delete process.env.SARNESS_AUTOCOMPACT_DEFAULT
++    expect(autoCompactEnabled(undefined)).toBe(false)
++    expect(autoCompactEnabled({ sarnessAutoCompact: true })).toBe(true)
++    process.env.SARNESS_AUTOCOMPACT_DEFAULT = "on"
++    expect(autoCompactEnabled({})).toBe(true)
++    expect(autoCompactEnabled({ sarnessAutoCompact: false })).toBe(false)
++  } finally {
++    if (before === undefined) delete process.env.SARNESS_AUTOCOMPACT_DEFAULT
++    else process.env.SARNESS_AUTOCOMPACT_DEFAULT = before
++  }
++})
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+index 13160a9..414e6a9 100644
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -495,7 +495,8 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
+         type: "compaction",
+         reason: "manual",
+         summary: "## Objective\n- manual summary",
+-        recent: "",
++        // SARNESS: the request is kept word for word beside the summary, never summarized away
++        recent: expect.stringContaining("[User]: Manual compaction should include this short conversation."),
+         cost: 0.0000233,
+         tokens: { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } },
+       },
+@@ -594,7 +595,13 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
+     expect(contexts).toBe(0)
+     expect(requests).toEqual([])
+     expect(yield* store.context(sessionID)).toMatchObject([
+-      { type: "compaction", reason: "manual", summary: "## Objective\n- hooked summary", recent: "" },
++      {
++        type: "compaction",
++        reason: "manual",
++        summary: "## Objective\n- hooked summary",
++        // SARNESS: the request is kept word for word beside the summary, never summarized away
++        recent: expect.stringContaining("[User]: Hooked compaction should see this conversation."),
++      },
+     ])
+     expect(
+       yield* db
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+index 3a9d55b..7b20ab5 100644
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -2944,9 +2944,13 @@ describe("SessionRunnerLLM", () => {
+ 
+     // The history fits the model's window by estimate, but the provider just rejected it, so older exchanges go.
+     expect(s.requests).toHaveLength(3)
+-    expect(userTexts(s.requests[1])[0]).toContain("older exchanges omitted")
++    // SARNESS: the keep allowance is clamped to the budget, so how many exchanges go is not fixed; one or more must.
++    expect(userTexts(s.requests[1])[0]).toMatch(/\[\d+ older exchanges? omitted\]/)
+     expect(userTexts(s.requests[1])[0]).not.toContain("Request 0:")
+-    expect(userTexts(s.requests[1])[0]).toContain("Request 3:")
++    // SARNESS: the newest exchange is kept verbatim beside the summary, so the summary input need not carry it.
++    const sent = userTexts(s.requests[1])[0]
++    const checkpoint = (yield* s.messages).find((message) => message.type === "compaction") as { recent?: string } | undefined
++    expect(sent.includes("Request 3:") || (checkpoint?.recent ?? "").includes("Request 3:")).toBeTrue()
+   })
+ 
+   scenario("serializes history and omits media after a summary input overflow", function* (s) {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 96ada64..3a0985b 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -1,3 +1,4 @@
++import { autoCompactEnabled } from "@opencode/util/sarness-autocompact"
+ import {
+   BoxRenderable,
+   RGBA,
+@@ -296,7 +297,7 @@ export function Prompt(props: PromptProps) {
+               await client.api.session.update({ sessionID: created.id, metadata: { sarnessAutoCompact: value === "on" } })
+             route.navigate({ type: "session", sessionID: created.id })
+             toast.show({
+-              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: OFF (current session)${value === "" ? " — /autocompact on|off|status" : ""}`,
++              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: ${autoCompactEnabled(undefined) ? "ON" : "OFF"} (new session)${value === "" ? " — /autocompact on|off|status" : ""}`,
+               variant: "info",
+             })
+           } catch (error) { toast.error(error) }
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+index b31cb83..7fac127 100644
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -1,3 +1,4 @@
++import { autoCompactEnabled } from "@opencode/util/sarness-autocompact"
+ import { Plugin } from "@opencode/plugin/tui"
+ import { createMemo, Show } from "solid-js"
+ import { contextUsage } from "../../util/session"
+@@ -23,7 +24,7 @@ export function SidebarContext(props: { context: Plugin.Context; sessionID: stri
+         <text fg={theme.text.base}>
+           <b>Context</b>
+         </text>
+-        <text fg={theme.text.muted}>Auto-compaction: {session()?.metadata?.sarnessAutoCompact === true ? "ON" : "OFF"}</text>
++        <text fg={theme.text.muted}>Auto-compaction: {autoCompactEnabled(session()?.metadata) ? "ON" : "OFF"}</text>
+         <Show when={state()}>
+           {(value) => (
+             <>
+@@ -34,7 +35,7 @@ export function SidebarContext(props: { context: Plugin.Context; sessionID: stri
+             </>
+           )}
+         </Show>
+-        <Show when={session()?.metadata?.sarnessAutoCompact !== true && (state()?.usablePercent ?? 0) >= 80}>
++        <Show when={!autoCompactEnabled(session()?.metadata) && (state()?.usablePercent ?? 0) >= 80}>
+           <text fg={theme.text.feedback.warning.base} wrapMode="word">
+             Context is approaching the model limit. Use /compact or start a new session.
+           </text>
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 9e95b29..7a18ac2 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -1,3 +1,4 @@
++import { autoCompactEnabled } from "@opencode/util/sarness-autocompact"
+ import {
+   batch,
+   createEffect,
+@@ -259,7 +260,7 @@ export function Session(props: {
+   let warnedContext = false
+   createEffect(() => {
+     const usage = contextUsage(messages(), models(), session()?.revert?.messageID)
+-    const nearLimit = session()?.metadata?.sarnessAutoCompact !== true && (usage?.usablePercent ?? 0) >= 80
++    const nearLimit = !autoCompactEnabled(session()?.metadata) && (usage?.usablePercent ?? 0) >= 80
+     if (nearLimit && !warnedContext) {
+       warnedContext = true
+       toast.show({ message: `Context is ${usage?.percent}% full. Use /compact or start a new session.`, variant: "warning", duration: 10000 })
+@@ -940,7 +941,7 @@ export function Session(props: {
+             })
+             return
+           }
+-          const state = current.metadata?.sarnessAutoCompact === true ? "ON" : "OFF"
++          const state = autoCompactEnabled(current.metadata) ? "ON" : "OFF"
+           toast.show({ message: `Auto-compaction: ${state} (current session)${value === "" ? " — /autocompact on|off|status" : ""}`, variant: "info" })
+         } catch (error) {
+           toast.error(error)
+diff --git a/packages/util/src/sarness-autocompact.ts b/packages/util/src/sarness-autocompact.ts
+new file mode 100644
+index 0000000..40c15db
+--- /dev/null
++++ b/packages/util/src/sarness-autocompact.ts
+@@ -0,0 +1,7 @@
++// SARNESS: a session's automatic-compaction choice. `/autocompact on|off` stores it on the session; a session that
++// has never been asked follows the launcher's default (SARNESS_AUTOCOMPACT_DEFAULT=on|off, off when unset).
++export const autoCompactEnabled = (metadata?: Record<string, unknown> | null): boolean => {
++  const chosen = metadata?.sarnessAutoCompact
++  if (typeof chosen === "boolean") return chosen
++  return process.env.SARNESS_AUTOCOMPACT_DEFAULT === "on"
++}
+-- 
+2.53.0
+

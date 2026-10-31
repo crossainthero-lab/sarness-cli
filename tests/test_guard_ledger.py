@@ -165,3 +165,9 @@ def test_the_ledger_is_bounded(led):
         led.record("shell", {"command": f"echo {i}"}, str(i))
     led.save()
     assert len(Ledger.open("ses_test").d["ops"]) <= 300 and led.d["ops_total"] == 400
+
+
+def test_calls_that_never_ran_are_not_evidence(led):
+    feed(led, shell("ssh h 'ls'", "NOT EXECUTED: [sarness-guard] repeats work already established"),
+         shell("rsync -a x h:~/", "DENIED: Action denied by user"), shell("ls", "a"))
+    assert led.d["ops_total"] == 1 and led.counter("not_executed") == 2
