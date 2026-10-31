@@ -334,3 +334,12 @@ def test_repeated_unfulfilled_promises_block_without_claiming_completion(tmp_pat
     with pytest.raises(SessionBlocked, match="promised work"):
         sess.run(engine, "run benchmark", 5)
     assert sess.status == "blocked:unfulfilled_action"
+
+
+def test_promise_detection_ignores_offers_and_earlier_plans():
+    from sarness_cli.agent import promises_action
+    assert promises_action("Server is up. I'll run the benchmark now.")
+    assert promises_action("Next, I will execute the training smoke test")
+    assert not promises_action("All 12 tests pass.\n\nIf you'd like, I'll update the README too.")
+    assert not promises_action("I'll run the tests first.\n...\nDone: tests pass (exit 0) and the fix is in calc.py.")
+    assert not promises_action("Want me to deploy it? Let me know.")

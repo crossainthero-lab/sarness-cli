@@ -132,3 +132,31 @@ def test_search_and_read_handle_multimegabyte_text_without_silent_skip(tmp_path)
     assert "benchmark.log:250001:" in matches
     excerpt = ws.execute("read_file", {"path": "benchmark.log", "offset": 250001, "limit": 5})
     assert "250001: BENCHMARK_COMPLETE" in excerpt
+
+
+def test_large_logs_are_read_in_ranges_and_searched_without_size_ceiling(tmp_path):
+    ws, root = ws_for(tmp_path)
+    lines = [f"line {i} ok" for i in range(1, 400_001)]
+    lines[350_000] = "line 350001 FATAL: CUDA out of memory"
+    (root / "train.log").write_text("\n".join(lines) + "\n")     # ~5.5 MB
+    assert (root / "train.log").stat().st_size > 5_000_000
+    found = ws.execute("search", {"pattern": "FATAL", "path": "train.log"})
+    assert "train.log:350001:" in found
+    page = ws.execute("read_file", {"path": "train.log", "offset": 349_999, "limit": 5})
+    assert "350001: line 350001 FATAL" in page and "lines 349999-350003/400000" in page
+    assert "more lines; call read_file with offset=350004" in page
+
+
+def test_read_file_tolerates_invalid_utf8_and_clips_giant_lines(tmp_path):
+    ws, root = ws_for(tmp_path)
+    (root / "latin.txt").write_bytes(b"caf\xe9\n" + b"x" * 50_000 + b"\n")
+    out = ws.execute("read_file", {"path": "latin.txt"})
+    assert "1: caf" in out and "more chars on this line" in out
+
+
+def test_search_skips_binary_files_and_says_so(tmp_path):
+    ws, root = ws_for(tmp_path)
+    (root / "blob.bin").write_bytes(b"\0\0needle\0")
+    (root / "a.txt").write_text("needle here\n")
+    out = ws.execute("search", {"pattern": "needle"})
+    assert "a.txt:1:" in out and "blob.bin" not in out.split("[")[0] and "1 binary file(s) not searched" in out

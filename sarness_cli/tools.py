@@ -353,10 +353,14 @@ class Workspace:
         selected = []
         count = 0
         # Iterate rather than load the entire file. Even a multi-megabyte log is readable.
-        with p.open("r", encoding="utf-8") as src:
+        # errors="replace": a stray Latin-1 byte must not make a whole log unreadable.
+        with p.open("r", encoding="utf-8", errors="replace") as src:
             for count, line in enumerate(src, 1):
                 if first <= count < first + limit:
-                    selected.append(f"{count}: {line.rstrip(chr(10)).rstrip(chr(13))}")
+                    line = line.rstrip("\n").rstrip("\r")
+                    if len(line) > 2000:   # one minified line must not flood the context
+                        line = line[:2000] + f" [... {len(line) - 2000} more chars on this line]"
+                    selected.append(f"{count}: {line}")
         last = min(count, first + limit - 1)
         more = f"\n[{count - last} more lines; call read_file with offset={last + 1}]" if count > last else ""
         return clipped(f"{a['path']} lines {first}-{last}/{count}\n" + "\n".join(selected), self.result_cap) + more
@@ -369,10 +373,15 @@ class Workspace:
         base = self.resolve(a.get("path", "."))
         files = [base] if base.is_file() else self._candidates(base)
         results: list[str] = []
+        skipped_binary = 0
         for f in files:
             try:
                 if not f.is_file():
                     continue
+                with f.open("rb") as raw:
+                    if b"\0" in raw.read(8192):
+                        skipped_binary += 1
+                        continue
                 # Stream text; silently skipping >500KB files hid matches in real projects.
                 with f.open("r", encoding="utf-8", errors="replace") as src:
                     for i, line in enumerate(src, 1):
@@ -383,7 +392,8 @@ class Workspace:
 
             except (OSError, UnicodeError):
                 continue
-        return clipped("\n".join(results) or "No matches", self.result_cap)
+        note = f"\n[{skipped_binary} binary file(s) not searched]" if skipped_binary else ""
+        return clipped("\n".join(results) or "No matches", self.result_cap) + note
 
     def _t_find_files(self, a: dict[str, Any]) -> str:
         pat = a["pattern"]

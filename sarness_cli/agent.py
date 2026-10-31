@@ -39,6 +39,17 @@ PENDING_ACTION = re.compile(
     r"(?:now\s+)?(?:run|execute|test|benchmark|check|inspect|read|write|edit|change|"
     r"install|build|start|launch|create|update|fix|fetch|verify|deploy|open|load)\b"
 )
+OFFER = re.compile(r"(?i)\b(?:if you(?:'d| would)? (?:like|want|prefer)|would you like|want me to|shall i|should i|"
+                   r"let me know|on request|if needed)\b")
+
+
+def promises_action(content: str) -> bool:
+    """True when a turn without tool calls ends by announcing work it did not do ("I'll run the benchmark now").
+    Only the closing text counts, and offers ("if you'd like, I'll ...") are a legitimate end of a turn."""
+    tail = content.strip()[-400:]
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", tail)
+    last = " ".join(s for s in sentences[-2:] if s)
+    return bool(PENDING_ACTION.search(last)) and not OFFER.search(last)
 
 
 def chunk_limit_for(max_tokens: int, cpt: float, attempt: int = 0) -> int:
@@ -647,7 +658,7 @@ class Session:
                     self._nudge("That looked like a tool call written as text, which cannot be executed. Use the structured function-call interface.")
                     continue
                 no_call = text_call = 0
-                if PENDING_ACTION.search(content):
+                if promises_action(content):
                     pending_nudges += 1
                     self.ui.notice("model promised an action but did not use a tool", "warn")
                     if pending_nudges >= 3:
