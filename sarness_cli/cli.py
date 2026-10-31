@@ -26,7 +26,7 @@ from .tools import Workspace
 from .ui import Console, banner_bypass
 from .policy import EffectivePermissions
 
-COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet", "opencode"}
+COMMANDS = {"setup", "models", "model", "config", "doctor", "sessions", "resume", "run", "server", "upgrade", "cabinet", "opencode", "code"}
 
 
 def common_flags(p: argparse.ArgumentParser, suppress: bool) -> None:
@@ -84,7 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     up = sp.add_parser("upgrade", parents=[parents], help="Reinstall from the recorded source directory"); up.add_argument("--pull", action="store_true")
     cab = sp.add_parser("cabinet", parents=[parents], help="Inspect server memory, view and load/unload models")
     cab.add_argument("subcommand", nargs="*", help="status, unload, release, load <id>, refresh")
-    sp.add_parser("opencode", parents=[parents], help="OpenCode TUI using Sarness Engine inference (experimental)")
+    for name, text in (("code", "Coding agent on the OpenCode runtime, inference on Sarness Engine"),
+                       ("opencode", "Alias of 'code'")):
+        oc = sp.add_parser(name, parents=[parents], help=text)
+        oc.add_argument("task", nargs="*", help="Run this task non-interactively instead of opening the TUI")
+        oc.add_argument("--session", dest="oc_session", help="OpenCode session ID to continue")
+        oc.add_argument("--continue", dest="oc_continue", action="store_true", help="Continue the last OpenCode session")
     return parser
 
 
@@ -565,33 +570,47 @@ def handle_resume(target_id: str | None, a: argparse.Namespace, prompt: str | No
 
 
 def cmd_opencode(a: argparse.Namespace) -> int:
-    """Keep Sarness Engine on the Spark; let OpenCode run local coding tools and TUI."""
+    """OpenCode runs the agent loop and tools on THIS computer; every model call goes through a loopback,
+    per-launch-authenticated bridge to Sarness Engine (see openai_bridge.py)."""
     workspace = resolve_workspace(a)
     settings, _ = effective_settings(workspace, overrides(a))
+    permissions = EffectivePermissions.for_launch(
+        workspace, settings["permissions"], bypass=getattr(a, "dangerously_skip_permissions", False))
     name, conn = open_connection(a, settings)
     try:
         engine = conn.connect()
         engine.health()
         models = engine.models()
         status = engine.llm_status()
-        loaded_id = status.get("model_id")
+        loaded_id = status.get("model_id") if status.get("state") == "ready" else None
         preferred = settings.get("model") or (f"local:{loaded_id}" if loaded_id else None)
         if not preferred:
-            raise ConfigError("No selected or loaded model. Run sarness model <id> or specify --model.")
+            raise ConfigError("No model is loaded or selected. Load one with 'sarness cabinet load <id>'.")
         try:
             selected = resolve_model(models, preferred)
         except ModelError as exc:
             raise ConfigError(str(exc)) from exc
-        if selected.get("local"):
-            if status.get("state") != "ready" or f"local:{loaded_id}" != selected["ref"]:
-                raise ConfigError("OpenCode bridge only uses the already-loaded local model to avoid evicting other clients. Load it first with sarness cabinet load <model>.")
-        print(f"Sarness Engine: {name}  |  model: {selected['ref']}  |  OpenCode tools: local", file=sys.stderr)
-        if getattr(a, "dangerously_skip_permissions", False):
-            print("Note: --dangerously-skip-permissions maps to OpenCode --auto; OpenCode controls its own tool permissions.", file=sys.stderr)
+        if selected.get("local") and f"local:{loaded_id}" != selected["ref"]:
+            raise ConfigError(f"{selected['ref']} is not the loaded model ({loaded_id or 'none'}). The OpenCode runtime never "
+                              "swaps models behind other users; load it first with 'sarness cabinet load "
+                              f"{selected['ref'].split(':', 1)[1]}'.")
+        effort = settings.get("effort") or "medium"
+        mode = permissions.mode
+        print(f"SARNESS  {selected.get('name') or selected['ref']} · {effort} effort · {name} · {mode.upper()}"
+              f" · ctx {status.get('ctx') or '?'} · runtime OpenCode", file=sys.stderr)
+        if mode == "bypass":
+            print("BYPASS: OpenCode auto-approves every tool call (--auto). OS permissions and engine auth still apply.",
+                  file=sys.stderr)
+        args = None
+        extra = (["--session", a.oc_session] if getattr(a, "oc_session", None) else []) + \
+                (["--continue"] if getattr(a, "oc_continue", False) else [])
+        task = " ".join(getattr(a, "task", None) or []).strip() or getattr(a, "prompt_opt", None)
+        if task:
+            args = ["run", "-m", f"sarness/{selected['ref']}", *extra, task]
         try:
-            return launch_opencode(engine, models, selected["ref"], workspace,
-                                   auto=getattr(a, "dangerously_skip_permissions", False))
-        except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            return launch_opencode(engine, models, selected["ref"], workspace, mode=mode, effort=effort, live=status,
+                                   args=args, tui_args=extra if not task else None)
+        except (RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise ConfigError(f"Cannot launch OpenCode: {exc}") from exc
     finally:
         conn.close()
@@ -621,7 +640,7 @@ def main(argv: list[str] | None = None) -> None:
             code = cmd_upgrade(a)
         elif cmd == "cabinet":
             code = cmd_cabinet(a)
-        elif cmd == "opencode":
+        elif cmd in ("opencode", "code"):
             code = cmd_opencode(a)
         elif cmd == "run":
             code = start_session(a, " ".join(a.prompt).strip() or None)
@@ -630,6 +649,9 @@ def main(argv: list[str] | None = None) -> None:
             code = handle_resume(a.session, a, prompt=prompt)
         elif getattr(a, "resume", None) is not None:
             code = handle_resume(a.resume, a, prompt=a.prompt_opt)
+        elif (load_config().get("settings", {}).get("runtime") == "opencode" and not a.continue_last
+              and not getattr(a, "prompt_opt", None)):
+            code = cmd_opencode(a)
         else:
             resume_id = None
             if a.continue_last:

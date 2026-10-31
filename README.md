@@ -210,32 +210,28 @@ and end-to-end `sarness run` flows. Permission propagation and installed/live ve
 * Commands are not OS-sandboxed. Linux/Ubuntu only (macOS likely works; Windows untested).
 * One agent task at a time; no background process tool (`start_process`) and no MCP.
 
-## Experimental: OpenCode TUI backed by Sarness Engine
+## OpenCode runtime (`sarness code`)
 
-OpenCode is an alternative *agent runtime and terminal UI*, not a replacement for Sarness
-Engine. The `sarness opencode` command starts a localhost-only, authenticated
-OpenAI Chat Completions bridge to the configured Sarness Engine, then launches OpenCode
-in your current workspace.
-
-Prerequisites: a working `sarness setup` profile, an already-loaded model with
-**structured tool calling**, and an installed `opencode` binary. Example:
+Sarness can run its agent loop on [OpenCode](https://opencode.ai) 2.x while every model call still goes to
+Sarness Engine. OpenCode runs on *this* computer (tools act on your workspace); a loopback-only bridge with a fresh
+per-launch key translates OpenAI Chat Completions to the engine's `/v1/agent/completions` over the existing SSH
+tunnel or TLS connection. The Sarness token never reaches OpenCode.
 
 ```bash
-sarness models --probe                # verify structured tools with the loaded model
-sarness opencode --server spark        # OpenCode's TUI; commands act on this computer
-sarness opencode --model local:MODEL_ID --dangerously-skip-permissions
+sarness code                          # OpenCode TUI in the current folder, inference on the default server
+sarness code "fix the failing test"   # one non-interactive task
+sarness code --continue               # continue the last OpenCode session
+sarness config set runtime opencode   # make plain `sarness` open this runtime (set back to native to revert)
 ```
 
-The OpenCode process receives temporary provider settings via an environment variable;
-the Sarness token is kept inside the existing Engine client and never copied into the
-OpenCode provider config. The localhost bridge uses a fresh per-launch access key and
-closes after OpenCode exits. Sarness refuses silent local model switches here:
-use `sarness cabinet load MODEL_ID` to load a different model explicitly.
+* Only the model that is already loaded is offered, with its live ctx/gpu_layers pinned: the bridge never reloads
+  or swaps a model behind other users. Load one first with `sarness cabinet load <id>`.
+* Effort maps to OpenCode variants (`low` / `medium` / `high`, pick with OpenCode's variant switcher); Engine 0.4
+  only exposes thinking on/off, so `low` = no thinking, `medium`/`high` = thinking.
+* Permission modes map to OpenCode rules: `ask` asks for edits and commands; `auto` allows edits and ordinary
+  commands but asks for installs, network, `rm -r`, `git push`, `sudo` and similar; `full-access` asks only for
+  destructive commands; `--dangerously-skip-permissions` = allow everything (`--auto`).
+* Sessions, compaction, undo/snapshots and the TUI are OpenCode's (stored in `~/.local/share/opencode`); native
+  Sarness sessions are untouched and still resume with `sarness resume`.
 
-OpenCode's tools, sessions and permission policy belong to **OpenCode**, not the
-Sarness native agent. In this mode `--dangerously-skip-permissions` maps to
-OpenCode's `--auto` option, not Sarness's native bypass guarantees. The launcher detects installed OpenCode 1.x versus 2.x; v2 runs with a private
-standalone server to inherit the per-launch local endpoint and credentials. The bridge has automated mock-engine tests,
-but live OpenCode + DGX Spark acceptance is still required.
-
-The native `sarness` TUI remains available and unchanged by this integration.
+See [docs/OPENCODE.md](docs/OPENCODE.md) for the runtime evaluation, protocol guarantees and live test results.
