@@ -1,7 +1,7 @@
 # OpenCode runtime: evaluation, design and live results
 
-Status: supported runtime since 0.3.0 (startup auto-load since 0.3.1) (`sarness code`, or `runtime = opencode`). The native runtime stays the
-default; see "Why native is still the default" below.
+Status: superseded in 0.4.0 by the Sarness terminal (docs/TERMINAL.md), a source fork that uses the same bridge.
+This page keeps the 0.3.x evaluation, the bridge's protocol guarantees (still valid) and the earlier live results.
 
 ## Execution flow
 

@@ -19,6 +19,7 @@ git clone https://github.com/crossainthero-lab/sarness-cli.git
 cd sarness-cli
 ./install.sh                    # isolated pipx environment, `sarness` lands in ~/.local/bin
 sarness setup                   # connect to your own Sarness Engine (guided)
+sarness tui install             # build + install the Sarness terminal (pinned source, ~5 min, ~3.5 GB temporary)
 cd ~/my-project && sarness      # start coding
 ```
 
@@ -60,12 +61,14 @@ file, shell history, logs, or Git. Several servers can coexist (`sarness server 
 ## Everyday commands
 
 ```bash
-sarness                     # interactive session in the current directory
-sarness --dangerously-skip-permissions # run in bypass mode (unrestricted execution; OS permissions still apply)
-sarness --resume            # interactively browse and resume previous sessions
-sarness --resume <id|name>  # resume a specific conversation
-sarness -p "fix the failing test"      # one task, non-interactive (also: sarness run "…")
-sarness -c                  # continue the latest session for this folder
+sarness                     # the Sarness terminal in the current directory (same as `sarness code`)
+sarness code "fix the failing test"    # one task through the Sarness terminal, non-interactive
+sarness code --session <id> # resume a Sarness terminal session (--continue: the latest)
+sarness --dangerously-skip-permissions # bypass mode (unrestricted execution; OS permissions still apply)
+sarness native              # the Python runtime (pre-0.4 interface): REPL, `sarness native "task"`
+sarness --resume            # browse and resume previous Python-runtime sessions (also -c, -p "task", run "…")
+sarness tui status|install  # the Sarness terminal build
+sarness tui migrate         # copy this project's 0.3.x (OpenCode) sessions into the Sarness terminal
 sarness models              # installed models: ids, context limits, tool/reasoning support (--json, --probe)
 sarness model [id]          # show / set the default model for the current server (--project: this folder only)
 sarness config              # effective settings and where each value comes from; `config set KEY VALUE [--project]`
@@ -74,7 +77,7 @@ sarness cabinet             # inspect server memory (RAM/VRAM) and load/unload m
 sarness sessions | server | upgrade | --version
 ```
 
-Interactive slash commands: `/help /cabinet /model /effort /thinking /permissions /status /plan /diff /compact /clear /resume /rename /exit`.
+The Python runtime's slash commands: `/help /cabinet /model /effort /thinking /permissions /status /plan /diff /compact /clear /resume /rename /exit`.
 **Enter** sends, **Alt+Enter** (or Esc,Enter, or a trailing ``) inserts a newline, **Ctrl-C** cancels the running task (state is saved),
 **Ctrl-D** quits. Large pasted prompts are automatically collapsed into compact `▸ Pasted text` indicators (expand/edit with **Ctrl-E**).
 The live bottom status bar shows: `Model · Effort · Server ● · RAM Used/Total · Permission Mode`.
@@ -210,32 +213,46 @@ and end-to-end `sarness run` flows. Permission propagation and installed/live ve
 * Commands are not OS-sandboxed. Linux/Ubuntu only (macOS likely works; Windows untested).
 * One agent task at a time; no background process tool (`start_process`) and no MCP.
 
-## OpenCode runtime (`sarness code`)
+## The Sarness terminal (`sarness`, `sarness code`)
 
-Sarness can run its agent loop on [OpenCode](https://opencode.ai) 2.x while every model call still goes to
-Sarness Engine. OpenCode runs on *this* computer (tools act on your workspace); a loopback-only bridge with a fresh
-per-launch key translates OpenAI Chat Completions to the engine's `/v1/agent/completions` over the existing SSH
-tunnel or TLS connection. The Sarness token never reaches OpenCode.
+`sarness` opens the Sarness terminal: a maintained fork of [OpenCode](https://github.com/anomalyco/opencode) 2.0.32
+(MIT) with Sarness branding, a bordered composer and a persistent line under it:
 
-```bash
-sarness code                          # OpenCode TUI in the current folder, inference on the default server
-sarness code "fix the failing test"   # one non-interactive task
-sarness code --continue               # continue the last OpenCode session
-sarness config set runtime opencode   # make plain `sarness` open this runtime (set back to native to revert)
+```
+────────────────────────────────────────────────────────────
+❯ Fix Schemra checkpoint recovery and verify tests
+────────────────────────────────────────────────────────────
+  Qwen3.6 35B-A3B · High · Spark · BYPASS · build
 ```
 
-* Startup: if your default model is loaded it starts at once; if nothing is loaded it loads the default (only if
-  it fits in the engine host's free memory with headroom) and waits for it; if a *different* model is loaded it
-  asks whether to use that one or switch (scripted runs fail with the exact flag instead: `--model <loaded>` or
-  `--allow-model-swap`). With no default yet, it opens the model selector and saves your choice.
-* Only the loaded model is offered to OpenCode, with its live ctx/gpu_layers pinned: the bridge never reloads or
-  swaps a model behind other users.
-* Effort maps to OpenCode variants (`low` / `medium` / `high`, pick with OpenCode's variant switcher); Engine 0.4
-  only exposes thinking on/off, so `low` = no thinking, `medium`/`high` = thinking.
-* Permission modes map to OpenCode rules: `ask` asks for edits and commands; `auto` allows edits and ordinary
-  commands but asks for installs, network, `rm -r`, `git push`, `sudo` and similar; `full-access` asks only for
-  destructive commands; `--dangerously-skip-permissions` = allow everything (`--auto`).
-* Sessions, compaction, undo/snapshots and the TUI are OpenCode's (stored in `~/.local/share/opencode`); native
-  Sarness sessions are untouched and still resume with `sarness resume`.
+It keeps OpenCode's agent runtime and tools: read/write/edit/search, shell, parallel tool calls, slash commands,
+the command palette (`ctrl+p`), sessions, resume and forking, undo/redo, compaction, agents and subagents, `@` file
+mentions, attachments, MCP, skills, custom commands, diffs, context usage and cancellation (`esc`). Inference goes
+only to Sarness Engine, through a loopback-only bridge with a fresh per-launch key. The Sarness token never reaches the
+terminal.
 
-See [docs/OPENCODE.md](docs/OPENCODE.md) for the runtime evaluation, protocol guarantees and live test results.
+* **Install:** `sarness tui install` builds it from the pinned upstream commit plus the patch series in
+  `sarness_cli/tui_build/` (Bun is pinned and checksum-verified). The previous build is kept for rollback. If it is
+  not installed, plain `sarness` falls back to the Python runtime and says so.
+* **Separate from OpenCode:** its data lives in `~/.local/share/sarness-code` (config `~/.config/sarness-code`). A
+  normal `opencode` installation is never written to or used for inference. Sessions from 0.3.x `sarness code` were
+  stored by the stock OpenCode: run `sarness tui migrate` in a project to copy that project's sessions across (OpenCode
+  is only asked to list and export them; the originals stay where they are).
+* **Startup:** if your default model is loaded it starts at once. If nothing is loaded, it loads the default (only if
+  it fits in the engine host's free memory with headroom) and waits for it. If a *different* model is loaded, it asks
+  whether to use that one or switch; scripted runs fail with the exact flag instead (`--model <loaded>` or
+  `--allow-model-swap`). With no default yet, it opens the model selector and saves your choice.
+* **The info line** is live: the model and effort variant currently selected (`ctrl+t` cycles effort), the server,
+  and the permission mode the generated rules enforce (auto-accept toggled in the terminal shows as `AUTO-ACCEPT`).
+  Engine 0.4 only has thinking on/off, so `Low` = thinking off and `Medium`/`High` = thinking on; they do not differ
+  otherwise.
+* **Permissions:** `ask` asks for edits and commands. `auto` allows edits and ordinary commands but asks for installs,
+  network, `rm -r`, `git push`, `sudo` and similar. `full-access` asks only for destructive commands. Bypass allows
+  everything.
+* **Sarness commands:** `/cabinet` opens the model cabinet (the terminal pauses while it runs). `/upgrade` points to
+  `sarness upgrade`. `/connect` explains that models come only from Sarness Engine.
+* Only the loaded model is offered, with its live ctx/gpu_layers pinned: the bridge never reloads or swaps a model
+  behind other users. Ctrl+C belongs to the terminal (the launcher does not die on it).
+
+See [docs/TERMINAL.md](docs/TERMINAL.md) for the fork design and delta, and [docs/OPENCODE.md](docs/OPENCODE.md) for
+the bridge protocol and earlier live results.

@@ -1,0 +1,381 @@
+From 053ad7098af88d0c3d87bc1a0d4c5ed1602398f5 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 13:52:57 +1100
+Subject: [PATCH 4/5] sarness: Sarness commands and user-facing text
+
+- /cabinet runs the real 'sarness cabinet' (TUI suspended), /upgrade explains 'sarness upgrade',
+  /connect explains that models come only from Sarness Engine; no cloud-provider onboarding
+- terminal title, notifications, dialogs, crash screen, hints and resume commands say Sarness
+---
+ packages/tui/src/app.tsx                      | 59 +++++++++++++------
+ packages/tui/src/attention.ts                 |  2 +-
+ packages/tui/src/component/dialog-update.tsx  |  6 +-
+ .../tui/src/component/error-component.tsx     |  6 +-
+ packages/tui/src/component/terminal-pane.tsx  |  2 +-
+ packages/tui/src/config/index.tsx             |  2 +-
+ .../src/feature-plugins/sidebar/footer.tsx    |  8 ++-
+ packages/tui/src/mini/footer.permission.tsx   |  4 +-
+ packages/tui/src/mini/footer.prompt.tsx       |  2 +-
+ packages/tui/src/mini/runtime.lifecycle.ts    |  4 +-
+ .../tui/src/routes/session/permission.tsx     |  2 +-
+ packages/tui/src/util/error-details.ts        |  4 +-
+ packages/tui/src/util/error.ts                |  4 +-
+ 13 files changed, 64 insertions(+), 41 deletions(-)
+
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 88939eb..ef04289 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -93,7 +93,7 @@ import { openUrl } from "@opencode/util/open"
+ import { PromptRefProvider, usePromptRef } from "./context/prompt"
+ import { Config, ConfigProvider, useConfig } from "./config"
+ import { newSessionLocation } from "./config/new-session-location"
+-import { UpdateNotificationProvider, useUpdateNotification, type UpdateSource } from "./context/update-notification"
++import { UpdateNotificationProvider, type UpdateSource } from "./context/update-notification"
+ import { PluginProvider, usePlugin, type PackageSource } from "./plugin/context"
+ import { localPluginDirectories } from "./plugin/discovery"
+ import { PluginRoute, Slot } from "./plugin/render"
+@@ -109,6 +109,7 @@ import { SessionTerminalsProvider } from "./context/session-terminals"
+ import { PanelProvider, usePanel } from "./context/panel"
+ import { SessionFrame } from "./component/session-frame"
+ import { createTuiClipboard } from "./clipboard"
++import { SarnessLaunch, runSarnessCommand } from "./sarness"
+ 
+ registerOpencodeSpinner()
+ 
+@@ -472,7 +473,6 @@ function App() {
+   const event = useEvent()
+   const client = useClient()
+   const toast = useToast()
+-  const updater = useUpdateNotification()
+   const theme = useTheme()
+   const { mode, supports, setMode, locked, lock, unlock, afterPaint } = useThemes()
+   const data = useData()
+@@ -607,23 +607,23 @@ function App() {
+     if (!terminalTitleEnabled()) return
+ 
+     if (route.data.type === "home") {
+-      renderer.setTerminalTitle("OpenCode")
++      renderer.setTerminalTitle("Sarness")
+       return
+     }
+ 
+     if (route.data.type === "session") {
+       const title = session?.title
+       if (!title || isFallbackTitle(title)) {
+-        renderer.setTerminalTitle("OpenCode")
++        renderer.setTerminalTitle("Sarness")
+         return
+       }
+ 
+-      renderer.setTerminalTitle(`OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
++      renderer.setTerminalTitle(`Sarness | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
+       return
+     }
+ 
+     if (route.data.type === "plugin") {
+-      renderer.setTerminalTitle(`OC | ${route.data.name}`)
++      renderer.setTerminalTitle(`Sarness | ${route.data.name}`)
+     }
+   })
+ 
+@@ -975,9 +975,18 @@ function App() {
+       {
+         name: "provider.connect",
+         title: "Connect an integration",
+-        suggested: !connected(),
++        suggested: !connected() && !SarnessLaunch.bin,
+         slash: { name: "connect" },
+         run: () => {
++          // SARNESS: inference only ever goes to Sarness Engine (the generated config enables no other provider).
++          if (SarnessLaunch.bin)
++            return toast.show({
++              title: "Not available in Sarness",
++              message:
++                "Models come from your Sarness Engine only. Load or switch models with /cabinet or 'sarness model'.",
++              variant: "info",
++              duration: 8000,
++            })
+           dialog.replace(() => (
+             <DialogIntegration
+               onConnected={(providerID) => dialog.replace(() => <DialogModel providerID={providerID} />)}
+@@ -1016,17 +1025,29 @@ function App() {
+         },
+         category: "System",
+       },
+-      ...(updater.open
+-        ? [
+-            {
+-              name: "opencode.update",
+-              title: "Update OpenCode",
+-              slash: { name: "update" },
+-              run: () => updater.open?.("manual"),
+-              category: "System",
+-            },
+-          ]
+-        : []),
++      // SARNESS: Sarness is upgraded by its own CLI, never by the upstream self-updater.
++      {
++        name: "sarness.upgrade",
++        title: "Upgrade Sarness",
++        slash: { name: "upgrade", aliases: ["update"] },
++        run: () => {
++          dialog.clear()
++          toast.show({ variant: "info", message: "Upgrade Sarness from a shell: sarness upgrade", duration: 8000 })
++        },
++        category: "System",
++      },
++      {
++        name: "sarness.cabinet",
++        title: "Model cabinet (server memory, load/unload models)",
++        suggested: true,
++        slash: { name: "cabinet" },
++        enabled: () => Boolean(SarnessLaunch.bin),
++        run: async () => {
++          dialog.clear()
++          await runSarnessCommand(renderer, ["cabinet"]).catch(toast.error)
++        },
++        category: "Sarness",
++      },
+       {
+         name: "server.pair",
+         title: "Pair device",
+@@ -1126,7 +1147,7 @@ function App() {
+         name: "docs.open",
+         title: "Open docs",
+         run: () => {
+-          openUrl("https://opencode.ai/docs").catch(() => {})
++          openUrl("https://github.com/crossainthero-lab/sarness-cli#readme").catch(() => {})
+           dialog.clear()
+         },
+         category: "System",
+diff --git a/packages/tui/src/attention.ts b/packages/tui/src/attention.ts
+index 544668d..f89f6c0 100644
+--- a/packages/tui/src/attention.ts
++++ b/packages/tui/src/attention.ts
+@@ -32,7 +32,7 @@ type AttentionHost = Attention & {
+   dispose(): void
+ }
+ 
+-const DEFAULT_TITLE = "OpenCode"
++const DEFAULT_TITLE = "Sarness"
+ const TITLE_LIMIT = 80
+ const MESSAGE_LIMIT = 240
+ const BUILTIN_SOUNDS: Record<AttentionSoundName, string> = {
+diff --git a/packages/tui/src/component/dialog-update.tsx b/packages/tui/src/component/dialog-update.tsx
+index 9dcf07b..7df9b3b 100644
+--- a/packages/tui/src/component/dialog-update.tsx
++++ b/packages/tui/src/component/dialog-update.tsx
+@@ -92,7 +92,7 @@ export function DialogUpdate(props: {
+         <DialogHeader
+           title={
+             state().type === "installing"
+-              ? "Updating OpenCode"
++              ? "Updating Sarness"
+               : state().type === "available" || state().type === "failed"
+                 ? "Update available"
+                 : "Update"
+@@ -142,7 +142,7 @@ export function DialogUpdate(props: {
+             </Match>
+             <Match when={current.type === "installing"}>
+               <Spinner shimmer={theme.text.base}>
+-                {current.type === "installing" ? `Installing OpenCode ${current.version}…` : ""}
++                {current.type === "installing" ? `Installing Sarness ${current.version}…` : ""}
+               </Spinner>
+             </Match>
+             <Match when={current.type === "installed"}>
+@@ -151,7 +151,7 @@ export function DialogUpdate(props: {
+               </text>
+             </Match>
+             <Match when={current.type === "current"}>
+-              <text fg={theme.text.muted}>OpenCode is already up to date.</text>
++              <text fg={theme.text.muted}>Sarness is already up to date.</text>
+             </Match>
+             <Match when={current.type === "unavailable"}>
+               <text fg={theme.text.muted} wrapMode="word">
+diff --git a/packages/tui/src/component/error-component.tsx b/packages/tui/src/component/error-component.tsx
+index 48ad4b1..03cff48 100644
+--- a/packages/tui/src/component/error-component.tsx
++++ b/packages/tui/src/component/error-component.tsx
+@@ -210,7 +210,7 @@ export function ErrorComponent(props: { error: Error; reset: () => void; mode?:
+                   ? "Clipboard write failed. Try again or report the crash manually."
+                   : "Copy the report and open a GitHub issue to help us fix this."}
+             </text>
+-            <text fg={colors.muted}>OpenCode {app.version}</text>
++            <text fg={colors.muted}>Sarness {app.version}</text>
+           </box>
+         </Show>
+       </box>
+@@ -229,7 +229,7 @@ function buildIssueURL(message: string, stack: string, version: string) {
+   url.searchParams.set("terminal", describeTerminal())
+   url.searchParams.set(
+     "reproduce",
+-    "Reported automatically from the OpenCode crash screen. If you can, describe what you were doing when it crashed.",
++    "Reported automatically from the Sarness crash screen. If you can, describe what you were doing when it crashed.",
+   )
+ 
+   // Budget the stack against the fully URL-encoded length (not the raw length) so
+@@ -238,7 +238,7 @@ function buildIssueURL(message: string, stack: string, version: string) {
+   // so measuring url.toString() is both correct and safe on any input.
+   const MAX_URL_LENGTH = 6000
+   const marker = "\n… (truncated)"
+-  const head = `The OpenCode TUI crashed with an unexpected error.\n\n**Error:** ${message}\n\n**Stack trace:**\n`
++  const head = `The Sarness TUI crashed with an unexpected error.\n\n**Error:** ${message}\n\n**Stack trace:**\n`
+   const setBody = (body: string) => url.searchParams.set("description", head + "```\n" + body + "\n```")
+ 
+   setBody(stack)
+diff --git a/packages/tui/src/component/terminal-pane.tsx b/packages/tui/src/component/terminal-pane.tsx
+index c5e0be3..f413067 100644
+--- a/packages/tui/src/component/terminal-pane.tsx
++++ b/packages/tui/src/component/terminal-pane.tsx
+@@ -240,7 +240,7 @@ export function TerminalPane(props: {
+       }
+       if (message.type !== "attached") return
+       if (!("inputProtocol" in message) || message.inputProtocol !== 1) {
+-        setFailure("Persistent terminal server is out of date; restart OpenCode")
++        setFailure("Persistent terminal server is out of date; restart Sarness")
+         next.close()
+         return
+       }
+diff --git a/packages/tui/src/config/index.tsx b/packages/tui/src/config/index.tsx
+index 953d597..729983a 100644
+--- a/packages/tui/src/config/index.tsx
++++ b/packages/tui/src/config/index.tsx
+@@ -249,7 +249,7 @@ export const Info = Schema.Struct({
+   }),
+   animations: Schema.optional(Schema.Boolean).annotate({ description: "Enable interface animations" }),
+   highlights: Schema.optional(Schema.Boolean).annotate({
+-    description: "Show the release highlights once after OpenCode updates",
++    description: "Show the release highlights once after Sarness updates",
+   }),
+   mouse: Schema.optional(Schema.Boolean).annotate({ description: "Enable terminal mouse capture" }),
+   cursor: Schema.optional(Cursor),
+diff --git a/packages/tui/src/feature-plugins/sidebar/footer.tsx b/packages/tui/src/feature-plugins/sidebar/footer.tsx
+index b875d5f..d3cb000 100644
+--- a/packages/tui/src/feature-plugins/sidebar/footer.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/footer.tsx
+@@ -6,6 +6,9 @@ import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
+ import { usePromptMove } from "../../component/prompt/move"
+ import { hasConnectedProvider } from "../../util/connected-provider"
+ 
++// SARNESS: inference is always Sarness Engine; never advertise cloud providers or "free models".
++const CLOUD_ONBOARDING = false as boolean
++
+ export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: string }) {
+   const dimensions = useTerminalDimensions()
+   const [onboarding, updateOnboarding] = props.context.storage.store("getting-started", {
+@@ -16,10 +19,9 @@ export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: s
+     props.context.data.location.integration.list(session()?.location ?? props.context.location),
+   )
+   const showOnboarding = createMemo(() => {
+-    if (dimensions().height < 22) return false
+     const list = integrations()
+-    if (!list) return false
+-    return !onboarding.dismissed && !hasConnectedProvider(list)
++    if (!list || dimensions().height < 22) return false
++    return CLOUD_ONBOARDING && !onboarding.dismissed && !hasConnectedProvider(list)
+   })
+ 
+   return (
+diff --git a/packages/tui/src/mini/footer.permission.tsx b/packages/tui/src/mini/footer.permission.tsx
+index 6f11e85..7f8573e 100644
+--- a/packages/tui/src/mini/footer.permission.tsx
++++ b/packages/tui/src/mini/footer.permission.tsx
+@@ -110,7 +110,7 @@ export function RejectField(props: {
+       minHeight={1}
+       maxHeight={3}
+       wrapMode="word"
+-      placeholder="Tell OpenCode what to do differently"
++      placeholder="Tell Sarness what to do differently"
+       placeholderColor={props.theme.muted}
+       textColor={props.theme.formfieldText}
+       focusedTextColor={props.theme.formfieldFocusedText}
+@@ -322,7 +322,7 @@ export function RunPermissionBody(props: {
+           {title()}
+         </text>
+         <Show when={!compact() && stage() === "reject"}>
+-          <text fg={props.theme.muted}>Tell OpenCode what to do differently</text>
++          <text fg={props.theme.muted}>Tell Sarness what to do differently</text>
+         </Show>
+       </box>
+ 
+diff --git a/packages/tui/src/mini/footer.prompt.tsx b/packages/tui/src/mini/footer.prompt.tsx
+index d698f12..5665e20 100644
+--- a/packages/tui/src/mini/footer.prompt.tsx
++++ b/packages/tui/src/mini/footer.prompt.tsx
+@@ -534,7 +534,7 @@ export function createPromptState(input: PromptInput): PromptState {
+         description: "compact older session context to free space",
+       } satisfies SlashOption,
+       ...EXIT_COMMANDS.map(
+-        (name) => ({ kind: "slash", name, display: `/${name}`, description: "close OpenCode" }) satisfies SlashOption,
++        (name) => ({ kind: "slash", name, display: `/${name}`, description: "close Sarness" }) satisfies SlashOption,
+       ),
+     ]
+     const hidden = new Set(builtins.map((item) => item.name))
+diff --git a/packages/tui/src/mini/runtime.lifecycle.ts b/packages/tui/src/mini/runtime.lifecycle.ts
+index 6a103bc..bbf84cd 100644
+--- a/packages/tui/src/mini/runtime.lifecycle.ts
++++ b/packages/tui/src/mini/runtime.lifecycle.ts
+@@ -174,8 +174,8 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
+   if (mono) renderer.on(CliRenderEvents.EXTERNAL_OUTPUT, monoSnapshot)
+   const setTitle = (title?: string) => {
+     if (input.host.platform !== "linux") return
+-    if (!title || isFallbackTitle(title)) return renderer.setTerminalTitle("OpenCode")
+-    renderer.setTerminalTitle(`OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
++    if (!title || isFallbackTitle(title)) return renderer.setTerminalTitle("Sarness")
++    renderer.setTerminalTitle(`Sarness | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
+   }
+   setTitle(input.sessionTitle)
+   const theme = await resolveRunTheme(renderer, tuiConfig.theme, mono)
+diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx
+index 07338ab..6d4b200 100644
+--- a/packages/tui/src/routes/session/permission.tsx
++++ b/packages/tui/src/routes/session/permission.tsx
+@@ -325,7 +325,7 @@ function RejectPrompt(props: {
+           <text fg={theme.text.base}>Reject permission</text>
+         </box>
+         <box paddingLeft={1}>
+-          <text fg={theme.text.muted}>Tell OpenCode what to do differently</text>
++          <text fg={theme.text.muted}>Tell Sarness what to do differently</text>
+         </box>
+       </box>
+       <box
+diff --git a/packages/tui/src/util/error-details.ts b/packages/tui/src/util/error-details.ts
+index 552e383..0ac55f6 100644
+--- a/packages/tui/src/util/error-details.ts
++++ b/packages/tui/src/util/error-details.ts
+@@ -8,14 +8,14 @@ export function errorDetails(input: { title: string; error: string; context?: st
+   return {
+     text,
+     prompt: [
+-      "Investigate why this OpenCode component failed in the current project.",
++      "Investigate why this Sarness component failed in the current project.",
+       text,
+       ...(input.diagnosticRef
+         ? [
+             `Find the server log entry matching reference ${input.diagnosticRef} and inspect its original cause. If the server logs are not accessible from this session, say so and ask for the matching log entry; do not infer the cause from the reference alone.`,
+           ]
+         : []),
+-      "Inspect the relevant project and global OpenCode configuration, startup or loading behavior, required environment variables or credentials, dependencies, and logs. Identify the root cause and recommend a fix. Do not expose credentials.",
++      "Inspect the relevant project and global Sarness configuration, startup or loading behavior, required environment variables or credentials, dependencies, and logs. Identify the root cause and recommend a fix. Do not expose credentials.",
+     ].join("\n\n"),
+   }
+ }
+diff --git a/packages/tui/src/util/error.ts b/packages/tui/src/util/error.ts
+index 33dff7b..14732da 100644
+--- a/packages/tui/src/util/error.ts
++++ b/packages/tui/src/util/error.ts
+@@ -24,8 +24,8 @@ export function cliErrorMessage(input: unknown): string | undefined {
+     return [
+       `Model not found: ${field(model, "providerID")}/${field(model, "modelID")}`,
+       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
+-      "Try: `opencode models` to list available models",
+-      "Or check your config (opencode.json) provider/model names",
++      "Try: `sarness models` to list the models on your Sarness Engine",
++      "Or pick one with `sarness model`",
+     ].join("\n")
+   }
+ 
+-- 
+2.53.0
+

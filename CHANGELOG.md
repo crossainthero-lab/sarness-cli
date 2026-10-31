@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.0 - 2026-10-31
+
+### Added
+- **The Sarness terminal.** `sarness` and `sarness code` now open a Sarness-branded fork of OpenCode 2.0.32 (MIT),
+  built from a pinned upstream commit plus a patch series (`sarness_cli/tui_build/`, design in docs/TERMINAL.md). It
+  keeps OpenCode's agent runtime, tools, sessions, compaction, undo, subagents, MCP, skills, `@` mentions, command
+  palette and diffs. Inference still goes only to Sarness Engine through the authenticated loopback bridge.
+  - Sarness identity throughout: SARNESS wordmark, terminal title, help, dialogs, notifications, crash screen, and the
+    exit screen with a `sarness code --session …` resume hint. Upstream attribution is kept (LICENSE-OpenCode is
+    installed with the binary).
+  - Bordered composer (full-width rules, `❯`) with a persistent line underneath: model · effort · server ·
+    permission mode. It stays visible while idle, thinking and running tools; live status and context usage stay in
+    the row below.
+  - Default `sarness` theme: black, white, grey metadata, blue accents.
+  - `/cabinet` runs the real model cabinet. `/upgrade` points to `sarness upgrade`. `/connect` explains that models
+    come only from Sarness Engine. The cloud "free models" onboarding is removed, and the upstream self-updater and
+    uninstaller refuse to run.
+  - Separate storage (`~/.local/share/sarness-code`, `~/.config/sarness-code`): a normal `opencode` install is never
+    run, read or modified.
+- `sarness tui install|status|path`: builds with a pinned, checksum-verified Bun and upstream's frozen lockfile, then
+  installs side by side and keeps the previous build (`previous` symlink) for rollback.
+- `sarness tui migrate`: copies the current project's OpenCode sessions (e.g. from 0.3.x, which ran stock OpenCode)
+  into the terminal's own storage. OpenCode is only asked to list and export (`--standalone`, so no background service
+  is left running); re-running skips sessions already present.
+- `sarness native [task]`: the Python runtime (the pre-0.4 interface) stays available. Plain `sarness` falls back to
+  it, with a notice, when the terminal is not installed; `sarness config set runtime native` makes it the default.
+
+### Fixed
+- Ctrl+C in `sarness code` killed the terminal: the Python launcher died on SIGINT and `subprocess.call` killed the
+  child (exit 130). The launcher now leaves Ctrl+C to the terminal, without making the terminal or the commands it
+  runs ignore SIGINT.
+- The configured effort (`--effort`, the `effort` setting) now selects the terminal's starting variant. In 0.3.x it
+  only set the bridge's fallback, while OpenCode remembered its own variant.
+
+### Unchanged
+- 0.3.1 startup (auto-load, readiness wait, memory guard, no silent swaps), the bridge protocol guarantees (cut
+  streams, incomplete tool calls, context pinning, cancellation), permission modes, and native sessions.
+
+Rollback: `pipx install --force 'git+https://github.com/crossainthero-lab/sarness-cli@v0.3.1'` (the terminal build
+can stay installed; 0.3.1 does not use it).
+
 ## 0.3.1 - 2026-10-31
 
 ### Fixed

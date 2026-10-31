@@ -1,0 +1,408 @@
+From e654ede58f3d2bfbd3ca9fe121a79053b3cbb3be Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 14:04:28 +1100
+Subject: [PATCH 5/5] sarness: adapt upstream tests to the Sarness identity,
+ theme and info line; agent label as named
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../tui/src/component/prompt/metadata.tsx     |  4 +--
+ packages/tui/test/app-lifecycle.test.tsx      | 26 +++++++++---------
+ packages/tui/test/cli/tui/dialog-mcp.test.tsx |  4 +--
+ packages/tui/test/cli/tui/theme-mode.test.tsx |  2 +-
+ packages/tui/test/command-selection.test.tsx  | 10 +++----
+ .../tui/test/component/dialog-update.test.tsx |  4 +--
+ packages/tui/test/context/theme.test.tsx      |  4 +--
+ .../feature-plugins/sidebar-footer.test.tsx   | 27 ++++---------------
+ .../tui/test/mini/blocker.responsive.test.tsx |  2 +-
+ packages/tui/test/mini/splash.test.ts         | 12 ++++-----
+ packages/tui/test/session-panel.test.tsx      |  2 +-
+ packages/tui/test/util/presentation.test.ts   |  2 +-
+ packages/util/test/global.test.ts             | 18 ++++++-------
+ 13 files changed, 50 insertions(+), 67 deletions(-)
+
+diff --git a/packages/tui/src/component/prompt/metadata.tsx b/packages/tui/src/component/prompt/metadata.tsx
+index 12902b1..9008c0f 100644
+--- a/packages/tui/src/component/prompt/metadata.tsx
++++ b/packages/tui/src/component/prompt/metadata.tsx
+@@ -168,7 +168,7 @@ export function SarnessInfoLine(props: {
+     const width = Math.max(10, dimensions().width - 8)
+     const effort = props.mode === "shell" ? "Shell" : sarnessEffortLabel(props.variant)
+     const tail = (agent: boolean, srv: boolean) =>
+-      [effort, srv ? server() : undefined, permission(), agent ? props.agent?.toLowerCase() : undefined].filter(
++      [effort, srv ? server() : undefined, permission(), agent ? props.agent : undefined].filter(
+         (item): item is string => Boolean(item),
+       )
+     for (const [agent, srv] of [
+@@ -188,7 +188,7 @@ export function SarnessInfoLine(props: {
+       if (item === "BYPASS" || item === "AUTO-ACCEPT") return theme.text.feedback.warning.base
+       return theme.hue.accent[300]
+     }
+-    if (layout().agent && item === props.agent?.toLowerCase()) return props.highlight
++    if (layout().agent && item === props.agent) return props.highlight
+     return theme.text.muted
+   }
+   return (
+diff --git a/packages/tui/test/app-lifecycle.test.tsx b/packages/tui/test/app-lifecycle.test.tsx
+index 2e9833e..60814d4 100644
+--- a/packages/tui/test/app-lifecycle.test.tsx
++++ b/packages/tui/test/app-lifecycle.test.tsx
+@@ -226,7 +226,7 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
+   const setTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+   setup.renderer.setTerminalTitle = (title) => {
+     titles.push(title)
+-    if (title === "OpenCode") started()
++    if (title === "Sarness") started()
+     setTitle(title)
+   }
+   const listeners = new Set(process.listeners("SIGHUP"))
+@@ -272,8 +272,8 @@ test("session lifecycle updates the terminal title and prints the epilogue after
+   })
+   const setTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+   setup.renderer.setTerminalTitle = (title) => {
+-    if (title === "OC | Demo session") initialTitle()
+-    if (title === "OC | Renamed session") renamedTitle()
++    if (title === "Sarness | Demo session") initialTitle()
++    if (title === "Sarness | Renamed session") renamedTitle()
+     setTitle(title)
+   }
+   const events = createEventStream()
+@@ -337,7 +337,7 @@ test("session lifecycle updates the terminal title and prints the epilogue after
+     await task
+ 
+     expect(stdout).toContain("Renamed session")
+-    expect(stdout).toContain("opencode -s dummy")
++    expect(stdout).toContain("sarness code --session dummy")
+     expect(promptRequests).toBe(0)
+   } finally {
+     process.stdout.write = originalWrite
+@@ -354,7 +354,7 @@ test("session title generated while an untitled session is loading remains visib
+   const generatedTitle = Promise.withResolvers<void>()
+   setup.renderer.setTerminalTitle = (title) => {
+     titles.push(title)
+-    if (title === "OC | Generated title") generatedTitle.resolve()
++    if (title === "Sarness | Generated title") generatedTitle.resolve()
+     setTitle(title)
+   }
+   const sessionRequested = Promise.withResolvers<void>()
+@@ -422,9 +422,9 @@ test("session title generated while an untitled session is loading remains visib
+     ])
+     await Bun.sleep(20)
+ 
+-    const generated = titles.lastIndexOf("OC | Generated title")
++    const generated = titles.lastIndexOf("Sarness | Generated title")
+     expect(generated).toBeGreaterThan(-1)
+-    expect(titles.slice(generated + 1)).not.toContain("OpenCode")
++    expect(titles.slice(generated + 1)).not.toContain("Sarness")
+     setup.renderer.destroy()
+     await task
+   } finally {
+@@ -551,7 +551,7 @@ test("automatic rename refreshes the displayed title before settling, even witho
+   })
+ 
+   try {
+-    await setup.waitForFrame((frame) => frame.includes(session.title) && frame.includes("Build · Model Provider"))
++    await setup.waitForFrame((frame) => frame.includes(session.title) && frame.includes("Model · Default · Build"))
+     await setup.mockInput.typeText("/rename")
+     setup.mockInput.pressEscape()
+     setup.mockInput.pressEnter()
+@@ -990,7 +990,7 @@ test.each([false, true])("uses the resolved launch directory for new prompts (fa
+   })
+ 
+   await setup.ready
+-  await setup.waitForFrame((frame) => frame.includes("Build · Remote Model Provider"))
++  await setup.waitForFrame((frame) => frame.includes("Remote Model · Default · Build"))
+   setup.mockInput.pressKey("F6")
+   await setup.renderOnce()
+   await setup.mockInput.typeText("REMOTE_READY")
+@@ -1275,7 +1275,7 @@ test("keeps the prompt display stable while a new location catalog loads", async
+ 
+   try {
+     await setup.ready
+-    await setup.waitForFrame((frame) => frame.includes("Build · Source Model Provider"))
++    await setup.waitForFrame((frame) => frame.includes("Source Model · Default · Build"))
+     const agentSpan = () =>
+       setup
+         .captureSpans()
+@@ -1306,15 +1306,15 @@ test("keeps the prompt display stable while a new location catalog loads", async
+     ])
+     await setup.renderOnce()
+ 
+-    expect(setup.captureCharFrame()).toContain("Build · Source Model Provider")
++    expect(setup.captureCharFrame()).toContain("Source Model · Default · Build")
+     expect(agentSpan()?.fg.toInts()).toEqual(sourceAgentColor)
+ 
+     catalog.resolve()
+-    const resolved = await setup.waitForFrame((frame) => frame.includes("Build · Target Model provider"))
++    const resolved = await setup.waitForFrame((frame) => frame.includes("Target Model · Default · Build"))
+     expect(resolved).not.toContain("Source Model")
+ 
+     providerCatalog.resolve()
+-    await setup.waitForFrame((frame) => frame.includes("Build · Target Model Provider"))
++    await setup.waitForFrame((frame) => frame.includes("Target Model · Default · Build"))
+   } finally {
+     locationCatalog.resolve()
+     catalog.resolve()
+diff --git a/packages/tui/test/cli/tui/dialog-mcp.test.tsx b/packages/tui/test/cli/tui/dialog-mcp.test.tsx
+index 1bb3432..b381141 100644
+--- a/packages/tui/test/cli/tui/dialog-mcp.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-mcp.test.tsx
+@@ -49,13 +49,13 @@ test("opens an investigation draft for a failed MCP server at its originating lo
+     expect(fixture.route.data.type).toBe("home")
+     if (fixture.route.data.type !== "home") throw new Error("Expected investigation to open a new session")
+     expect(fixture.route.data.location).toEqual(location)
+-    expect(fixture.route.data.prompt?.text).toContain("OpenCode component failed in the current project")
++    expect(fixture.route.data.prompt?.text).toContain("Sarness component failed in the current project")
+     expect(fixture.route.data.prompt?.text).toContain("MCP server: linear")
+     expect(fixture.route.data.prompt?.text).toContain("Status: failed")
+     expect(fixture.route.data.prompt?.text).toContain("Configuration: mcp.servers.linear")
+     expect(fixture.route.data.prompt?.text).toContain("Integration: mcp_linear")
+     expect(fixture.route.data.prompt?.text).toContain("MCP error -32000: Connection closed")
+-    expect(fixture.route.data.prompt?.text).toContain("project and global OpenCode configuration")
++    expect(fixture.route.data.prompt?.text).toContain("project and global Sarness configuration")
+     expect(fixture.route.data.prompt?.text).not.toContain(location.directory)
+   } finally {
+     fixture.app.renderer.destroy()
+diff --git a/packages/tui/test/cli/tui/theme-mode.test.tsx b/packages/tui/test/cli/tui/theme-mode.test.tsx
+index d6d8718..5895b19 100644
+--- a/packages/tui/test/cli/tui/theme-mode.test.tsx
++++ b/packages/tui/test/cli/tui/theme-mode.test.tsx
+@@ -121,7 +121,7 @@ test.each([
+ 
+   try {
+     await wait(() => themes?.ready === true)
+-    expect(themes?.selected).toBe("opencode")
++    expect(themes?.selected).toBe("sarness")
+     expect(failure?.name).toBe("invalid")
+     expect(failure?.error).toBeInstanceOf(Error)
+     expect(failure?.error.message.length).toBeGreaterThan(0)
+diff --git a/packages/tui/test/command-selection.test.tsx b/packages/tui/test/command-selection.test.tsx
+index 3bfa2e6..b5955c5 100644
+--- a/packages/tui/test/command-selection.test.tsx
++++ b/packages/tui/test/command-selection.test.tsx
+@@ -61,9 +61,9 @@ test("custom commands commit the captured agent, model and variant before execut
+   })
+   try {
+     await setup.ready
+-    await setup.waitForFrame((frame) => frame.includes("Build · first model"))
++    await setup.waitForFrame((frame) => frame.includes("first model · Default · Build"))
+     setup.mockInput.pressKey("F6")
+-    await setup.waitForFrame((frame) => frame.includes("Plan ·"))
++    await setup.waitForFrame((frame) => frame.includes("· Plan"))
+     setup.mockInput.pressKey("F8")
+     await setup.waitForFrame(
+       (frame) => frame.includes("Select model") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+@@ -83,7 +83,7 @@ test("custom commands commit the captured agent, model and variant before execut
+     setup.mockInput.pressEnter()
+     await setup.waitForFrame(
+       (frame) =>
+-        frame.includes("Plan · second model Demo · low") &&
++        frame.includes("second model · Low · Plan") &&
+         setup.renderer.currentFocusedRenderable instanceof TextareaRenderable,
+     )
+     await setup.mockInput.typeText("/review selected input")
+@@ -93,9 +93,9 @@ test("custom commands commit the captured agent, model and variant before execut
+     expect(mutations).toEqual([{ type: "agent", body: { agent: "plan" } }])
+ 
+     // A later local edit must not change the in-flight command's selection.
+-    await waitForFrame(setup, (frame) => frame.includes("Plan · second model Demo · low"))
++    await waitForFrame(setup, (frame) => frame.includes("second model · Low · Plan"))
+     setup.mockInput.pressKey("F7")
+-    await waitForFrame(setup, (frame) => frame.includes("high"))
++    await waitForFrame(setup, (frame) => frame.includes("High"))
+     agent.resolve(new Response(null, { status: 204 }))
+     await setup.waitFor(() => mutations.length === 2)
+     expect(mutations[1]).toEqual({
+diff --git a/packages/tui/test/component/dialog-update.test.tsx b/packages/tui/test/component/dialog-update.test.tsx
+index 066933e..055d2ac 100644
+--- a/packages/tui/test/component/dialog-update.test.tsx
++++ b/packages/tui/test/component/dialog-update.test.tsx
+@@ -48,8 +48,8 @@ test("installation progress replaces checking while the update job is still pend
+     setState({ type: "installing", version: "2.0.0" })
+     await app.waitForFrame(
+       (frame) =>
+-        frame.includes("Updating OpenCode") &&
+-        frame.includes("Installing OpenCode 2.0.0") &&
++        frame.includes("Updating Sarness") &&
++        frame.includes("Installing Sarness 2.0.0") &&
+         !frame.includes("Checking"),
+     )
+     expect(app.captureCharFrame()).not.toContain("Skip")
+diff --git a/packages/tui/test/context/theme.test.tsx b/packages/tui/test/context/theme.test.tsx
+index 1989e3e..e817a38 100644
+--- a/packages/tui/test/context/theme.test.tsx
++++ b/packages/tui/test/context/theme.test.tsx
+@@ -4,7 +4,7 @@ import { expect, test } from "bun:test"
+ import { resolveThemeDocument } from "@opencode/theme/tui"
+ import { ConfigProvider, useConfig, type Info } from "../../src/config"
+ import { ThemeProvider, useTheme, useThemes } from "../../src/context/theme"
+-import { getOpenCode2Theme, getOpenCodeTheme } from "../../src/theme"
++import { getOpenCode2Theme, getSarnessTheme } from "../../src/theme"
+ import { emptyThemeSource, tmpdir } from "../fixture/fixture"
+ import { TestTuiContexts } from "../fixture/tui-environment"
+ import { createTuiResolvedConfig } from "../fixture/tui-runtime"
+@@ -58,7 +58,7 @@ test("offers opencode2 only while the new designs experiment is enabled", async
+       draft.experimental = { "new-designs": false }
+     })
+     expect(themes.has("opencode2")).toBeFalse()
+-    expect(theme.background.base.equals(resolveThemeDocument(getOpenCodeTheme(), "dark").background.base)).toBeTrue()
++    expect(theme.background.base.equals(resolveThemeDocument(getSarnessTheme(), "dark").background.base)).toBeTrue()
+     expect(themes.selected).toBe("opencode2")
+     expect(settings.theme?.name).toBe("opencode2")
+   } finally {
+diff --git a/packages/tui/test/feature-plugins/sidebar-footer.test.tsx b/packages/tui/test/feature-plugins/sidebar-footer.test.tsx
+index 8a872f9..1b08417 100644
+--- a/packages/tui/test/feature-plugins/sidebar-footer.test.tsx
++++ b/packages/tui/test/feature-plugins/sidebar-footer.test.tsx
+@@ -80,15 +80,15 @@ test("sidebar preserves the compact layout when the onboarding card cannot fit",
+   }
+ })
+ 
+-test("sidebar shows onboarding without a connected integration", async () => {
++// SARNESS: inference is always Sarness Engine, so the cloud-provider onboarding card is never shown.
++test("sidebar never shows cloud-provider onboarding", async () => {
+   const app = await render(context({ integrations: [] }))
+ 
+   try {
+     const frame = app.captureCharFrame()
+-    expect(frame).toContain("Getting started")
+-    expect(frame).toContain("OpenCode includes free models")
+-    expect(frame).toContain("Connect provider")
+-    expect(frame).toContain("/connect")
++    expect(frame).not.toContain("Getting started")
++    expect(frame).not.toContain("free models")
++    expect(app.renderer.root.findDescendantById("sidebar.footer.getting-started.connect")).toBeUndefined()
+   } finally {
+     app.renderer.destroy()
+   }
+@@ -107,20 +107,3 @@ test("sidebar hides onboarding after an integration is connected or the card is
+   }
+ })
+ 
+-test("sidebar onboarding opens integrations and can be dismissed", async () => {
+-  const dispatched: string[] = []
+-  const app = await render(context({ integrations: [], dispatched }))
+-
+-  try {
+-    const connect = app.renderer.root.findDescendantById("sidebar.footer.getting-started.connect")!
+-    await app.mockMouse.click(connect.x, connect.y)
+-    expect(dispatched).toEqual(["provider.connect"])
+-
+-    const dismiss = app.renderer.root.findDescendantById("sidebar.footer.getting-started.dismiss")!
+-    await app.mockMouse.click(dismiss.x, dismiss.y)
+-    await app.renderOnce()
+-    expect(app.captureCharFrame()).not.toContain("Getting started")
+-  } finally {
+-    app.renderer.destroy()
+-  }
+-})
+diff --git a/packages/tui/test/mini/blocker.responsive.test.tsx b/packages/tui/test/mini/blocker.responsive.test.tsx
+index b851f1b..5cbc3a4 100644
+--- a/packages/tui/test/mini/blocker.responsive.test.tsx
++++ b/packages/tui/test/mini/blocker.responsive.test.tsx
+@@ -257,7 +257,7 @@ test("roomy rejection keeps the editor and confirmation hints inline", async ()
+     expect(confirm.y).toBe(editor.y)
+     expect(confirm.x).toBeGreaterThanOrEqual(editor.x + editor.width)
+     expect(app.captureCharFrame()).toContain("esc cancel")
+-    expect(app.captureCharFrame()).toContain("Tell OpenCode what to do differently")
++    expect(app.captureCharFrame()).toContain("Tell Sarness what to do differently")
+   } finally {
+     app.renderer.destroy()
+   }
+diff --git a/packages/tui/test/mini/splash.test.ts b/packages/tui/test/mini/splash.test.ts
+index 37c778d..b486458 100644
+--- a/packages/tui/test/mini/splash.test.ts
++++ b/packages/tui/test/mini/splash.test.ts
+@@ -175,22 +175,22 @@ test.each(
+     exitSplash({ ...input, title: "Review mini layout", session_id: sessionID, theme }),
+     input.width,
+   )
+-  const command = `opencode mini -s ${sessionID}`
++  const command = `sarness code --session ${sessionID}`
+   const commandRows =
+-    input.width >= 80 ? [result.rows[2].slice(result.rows[2].indexOf("opencode"))] : result.rows.slice(1)
++    input.width >= 80 ? [result.rows[2].slice(result.rows[2].indexOf("sarness"))] : result.rows.slice(1)
+   const reconstructed = commandRows
+     .map((row, index) => (index < commandRows.length - 1 ? row.padEnd(input.width) : row))
+     .join("")
+   expect(reconstructed).toBe(command)
+   if (input.width >= 80) {
+-    expect(result.rows[1].startsWith(input.mono ? "[O]" : "█▀▀█")).toBe(true)
++    expect(result.rows[1].startsWith(input.mono ? "[S]" : "█▀▀▀")).toBe(true)
+     expect(result.rows[1].includes("Session  Review mini layout")).toBe(input.showSession)
+     expect(result.rows[2]).toContain("Continue " + command)
+   } else {
+-    expect(result.rows.join("\n")).not.toMatch(/Session|Continue|Review mini layout|█|\[O\]/)
++    expect(result.rows.join("\n")).not.toMatch(/Session|Continue|Review mini layout|█|\[S\]/)
+     expect(result.rows).toHaveLength(1 + Math.ceil(command.length / input.width))
+   }
+   if (input.mono) expect(result.rows.join("")).not.toMatch(/[^\x20-\x7e]/)
+-  expect(result.spans.find((span) => span.text.includes("opencode"))?.fg.intent).toBe("default")
+-  expect(result.spans.find((span) => span.text.includes("opencode"))?.fg.toInts()).toEqual(theme.right.toInts())
++  expect(result.spans.find((span) => span.text.includes("sarness"))?.fg.intent).toBe("default")
++  expect(result.spans.find((span) => span.text.includes("sarness"))?.fg.toInts()).toEqual(theme.right.toInts())
+ })
+diff --git a/packages/tui/test/session-panel.test.tsx b/packages/tui/test/session-panel.test.tsx
+index 635651f..4d184ac 100644
+--- a/packages/tui/test/session-panel.test.tsx
++++ b/packages/tui/test/session-panel.test.tsx
+@@ -667,7 +667,7 @@ type AppFixture = Awaited<ReturnType<typeof createAppFixture>>
+ 
+ async function ready(setup: AppFixture) {
+   await setup.ready
+-  await setup.waitForFrame((frame) => frame.includes("Transcript item 11") && frame.includes("Build · Model Fixture"), {
++  await setup.waitForFrame((frame) => frame.includes("Transcript item 11") && frame.includes("Model · Default · Build"), {
+     maxPasses: 120,
+   })
+   await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof TextareaRenderable)
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+index d1aab4e..76dffaf 100644
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -4,5 +4,5 @@ import { sessionEpilogue } from "../../src/util/presentation"
+ test("formats session continuation summary", () => {
+   const epilogue = sessionEpilogue({ title: "A session", sessionID: "ses_123" })
+   expect(epilogue).toContain("A session")
+-  expect(epilogue).toContain("opencode -s ses_123")
++  expect(epilogue).toContain("sarness code --session ses_123")
+ })
+diff --git a/packages/util/test/global.test.ts b/packages/util/test/global.test.ts
+index ed7787f..cc0e795 100644
+--- a/packages/util/test/global.test.ts
++++ b/packages/util/test/global.test.ts
+@@ -27,7 +27,7 @@ describe("global", () => {
+     })
+ 
+     expect(result.exitCode, result.stderr.toString()).toBe(0)
+-    directories.forEach((directory) => expect(fs.existsSync(path.join(directory, "opencode"))).toBe(false))
++    directories.forEach((directory) => expect(fs.existsSync(path.join(directory, "sarness-code"))).toBe(false))
+     fs.rmSync(root, { recursive: true, force: true })
+   })
+ 
+@@ -83,15 +83,15 @@ describe("global", () => {
+     expect(result.exitCode, result.stderr.toString()).toBe(0)
+     // The layer canonicalizes through the native realpath, which on Windows also expands 8.3 short
+     // names such as RUNNER~1 that the JavaScript realpathSync leaves in place.
+-    expect(result.stdout.toString()).toBe(fs.realpathSync.native(path.join(directories[4], "opencode")))
++    expect(result.stdout.toString()).toBe(fs.realpathSync.native(path.join(directories[4], "sarness-code")))
+     const created = [
+-      path.join(directories[0], "opencode"),
+-      path.join(directories[1], "opencode", "bin"),
+-      path.join(directories[2], "opencode"),
+-      path.join(directories[3], "opencode"),
+-      path.join(directories[0], "opencode", "log"),
+-      path.join(directories[0], "opencode", "repos"),
+-      path.join(directories[4], "opencode"),
++      path.join(directories[0], "sarness-code"),
++      path.join(directories[1], "sarness-code", "bin"),
++      path.join(directories[2], "sarness-code"),
++      path.join(directories[3], "sarness-code"),
++      path.join(directories[0], "sarness-code", "log"),
++      path.join(directories[0], "sarness-code", "repos"),
++      path.join(directories[4], "sarness-code"),
+     ]
+     created.forEach((directory) => expect(fs.statSync(directory).isDirectory()).toBe(true))
+     fs.rmSync(root, { recursive: true, force: true })
+-- 
+2.53.0
+

@@ -54,7 +54,7 @@ def _usable(model: dict[str, Any]) -> str | None:
     if model.get("supported") is False:
         return f"{_name(model)} is not supported by this engine: {model.get('unsupported_reason') or 'unsupported'}"
     if not model.get("local"):
-        return (f"{_name(model)} is a remote endpoint model; the OpenCode runtime only drives a model loaded in "
+        return (f"{_name(model)} is a remote endpoint model; the Sarness terminal only drives a model loaded in "
                 "Sarness Engine itself")
     return None
 
