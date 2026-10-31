@@ -70,6 +70,11 @@ def parse_sse(lines: Any, on_event: Callable[[dict[str, Any]], None] | None = No
                           "stream", retryable=True)
     if not isinstance(done.get("message"), dict):
         raise EngineError("Engine returned an invalid final message", "protocol")
+    if not done.get("finish_reason"):
+        # Engine 0.4 still sends `done` when its model server's stream breaks off, just without a finish reason:
+        # the turn (and any tool call in it) is incomplete.
+        raise EngineError("The model server's stream was cut off before the turn finished; no tools were executed",
+                          "stream", retryable=True)
     return done
 
 
@@ -257,10 +262,15 @@ class Engine:
         return out
 
     def completion(self, model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-                   params: dict[str, Any], on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+                   params: dict[str, Any], on_event: Callable[[dict[str, Any]], None] | None = None,
+                   on_open: Callable[[Any], None] | None = None) -> dict[str, Any]:
+        """`on_open(response)` receives the live stream so another thread can abort it (closing it cancels the
+        generation on the engine)."""
         data = {"model_ref": model, "messages": messages, "tools": tools, "tool_choice": "auto", "params": params}
         try:
             with self.request("POST", "/v1/agent/completions", data, stream=True) as stream:
+                if on_open:
+                    on_open(stream)
                 try:
                     return parse_sse(stream, on_event)
                 except (socket.timeout, TimeoutError) as exc:
