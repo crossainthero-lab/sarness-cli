@@ -618,7 +618,14 @@ def cmd_opencode(a: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    a = parser.parse_args(argv)
+    # Python <= 3.12 argparse binds an empty list to a trailing nargs="*" positional when options sit between the
+    # positionals ("resume ID --mode auto 'text'"), then rejects the text. Gather such words into the prompt.
+    a, extra = parser.parse_known_args(argv)
+    if extra:
+        target = {"resume": "prompt", "run": "prompt", "code": "task", "opencode": "task"}.get(a.command or "")
+        if not target or any(x.startswith("-") for x in extra):
+            parser.error("unrecognized arguments: " + " ".join(extra))
+        setattr(a, target, list(getattr(a, target, None) or []) + extra)
     try:
         cmd = a.command
         if cmd == "setup":
