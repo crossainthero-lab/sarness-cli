@@ -44,9 +44,16 @@ _STOPWORDS = {"the", "server", "host", "machine", "box", "remote", "it", "this",
               "and", "then", "there", "here", "via", "using"}
 
 
+# The terminal flattens an over-long history into one user-role message made of transcript lines when it asks for a summary:
+# "[N older exchanges omitted]" and "[User]: ...", "[Assistant]: ...", "[Tool result]: ..." blocks. Tool output inside it must
+# never be read as something the user said.
+_TRANSCRIPT = re.compile(r"^\[(?:\d+ older exchanges? omitted|User\]:|Assistant|Tool (?:result|error)\]:|Shell\]:|Synthetic context\]:|"
+                         r"Skill activated)")
+
+
 def is_real_user_text(text: str) -> bool:
     t = text.lstrip()
-    return bool(t) and not any(t.startswith(p) for p in SYNTHETIC_PREFIXES)
+    return bool(t) and not any(t.startswith(p) for p in SYNTHETIC_PREFIXES) and not _TRANSCRIPT.match(t)
 
 
 def is_continue_only(text: str) -> bool:

@@ -53,9 +53,29 @@ def file_hash(path: str | Path, cap: int = 4_000_000) -> tuple[str, int] | None:
         return None
 
 
+_PRUNED: set[str] = set()
+LEDGER_MAX_AGE_DAYS = 60
+
+
+def prune(directory: Path, days: int = LEDGER_MAX_AGE_DAYS) -> int:
+    """Delete ledgers nobody has touched for `days` days (their sessions are long gone). Returns how many were removed."""
+    cutoff, removed = time.time() - days * 86400, 0
+    for f in directory.glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def ledger_dir() -> Path:
     d = config.state_dir() / "ledgers"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if str(d) not in _PRUNED:                  # once per process and directory
+        _PRUNED.add(str(d))
+        prune(d)
     return d
 
 
@@ -258,7 +278,7 @@ class Ledger:
                 seen.add(sid)
                 self.d["seen"].append(sid)
                 self.d["pending"].pop(cid, None)
-                if text.lstrip().startswith(("NOT EXECUTED", "DENIED:")):
+                if text.lstrip().startswith(("NOT EXECUTED", "DENIED:")) or _DECLINED.search(text[:200]):
                     self.counter("not_executed", 1)        # refused or denied: it did not run, so it is not evidence of anything
                     continue
                 op = self.record(name, args, text)
@@ -661,6 +681,8 @@ class Ledger:
         self.save()
 
 
+# the terminal's own wording when the user rejects an approval prompt or the call is cancelled before it runs
+_DECLINED = re.compile(r"(?i)\b(?:user (?:declined|rejected|denied)|declined this tool call|rejected permission|tool call was (?:rejected|cancelled|aborted))\b")
 _RECENT_CALL = re.compile(r"(?m)^\[Assistant tool call\]: (\w+)\((\{.*\})\)$")
 _RECENT_NEXT = re.compile(r"\n(?=\[(?:Assistant(?: tool call| reasoning)?|User|Tool result|Tool error|Shell|Synthetic context)\]: )")
 

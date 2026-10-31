@@ -84,6 +84,10 @@ class Guard:
         """Feed the ledger from the request history. Safe to call on every request."""
         led = self.led
         real = [message_text(m) for m in messages if m.get("role") == "user" and S.is_real_user_text(message_text(m))]
+        if self.utility_kind(messages):
+            # a summary request only carries history to be summarised and states nothing new: it may start an empty ledger
+            # from the first genuine user message it contains, never replace an objective or add to it
+            real = real[:1] if not led.objective else []
         if real:
             if not led.objective:
                 led.set_request(real[0])

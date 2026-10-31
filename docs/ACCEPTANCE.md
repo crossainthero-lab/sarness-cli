@@ -55,3 +55,43 @@ waited until the Engine had no stream from anyone else and enough free memory (t
 Not covered: cancelling during prefill (the Engine sends response headers only with the first token, so a stream is
 released when prefill ends), and a remote command started by an `ssh` the agent itself runs (Sarness only stops the
 local client).
+
+
+# Live acceptance: agent reliability (2026-11-01, 0.4.2)
+
+Real model, real server. The agent ran on the desktop (terminal built from the 0.4.2 patch series, CLI from the branch) against the
+DGX Spark's Sarness Engine (Qwen3.6 35B-A3B MXFP4_MOE, ctx 32768, the model that was already loaded: nothing was loaded, swapped or
+unloaded) through the user's SSH tunnel profile, and SSHed to the Spark for real. The "server" was a throwaway directory and one
+disposable user service (`sarness-accept-g042-r1`, a tiny HTTP service with a seeded bug) that were removed afterwards. Mode `auto`
+with a strict approval driver: each permission prompt was read and approved only if the command was clearly about that directory
+and that one unit (heredoc and `bash -c` forms are unwrapped and checked inside); everything else was rejected and logged. Before
+every run the Spark was idle (load 0.0-0.3, GPU 0%, 57-61 GB available); other Spark processes (Engine and its llama-server, Schemra,
+the semechka services) had the same PIDs and start times before and after every run. No credential value is in the saved evidence.
+The task: read a long operations file, find why `/mean?values=2,4,6` returns 3.0 on the server, fix `calc/core.py`, run the tests,
+deploy with `scripts/deploy.sh` (rsync plus `systemctl --user restart`), verify the live service. The checks below were made by the
+driver afterwards from files, the live service and the ledger, never from the model's account.
+
+| run | what | outcome (independent checks) |
+| --- | --- | --- |
+| D | **pure 0.4.1**, a ~5k-character multi-phase directive (the shape of the Trinodal one) | **failed.** The directive was compacted within the first minute; the summary dropped the user name, so the model SSHed as `dembele@` instead of `fylume@` and typed `systemctl--user`. Nothing was changed (the approval driver rejected the wrong-target command) |
+| E | **0.4.2**, the same directive | **done**: source fixed, tests pass (run after the change), deploy ran and the service answers 4.0, remote copy equals local, only the expected files on the server. 1 real compaction, 23 recorded operations, 9 assistant turns, 0 questions, 2 malformed `ssh` commands repaired by the guard (the approval prompts showed the corrected command) |
+| A | 0.4.2, short prompt, guard on | **done** (same checks): 1 compaction, 16 operations, 8 assistant turns, 0 interventions needed |
+| B | 0.4.2, three prompts in one session (inspect, fix and test, deploy and verify) with `/compact` typed between them: 2 deliberate compactions at different stages | **done**: the objective changed with each prompt, the facts, the file change and the test run (against the current change) carried across both compactions, the deploy was accepted only because tests had run against the current change. 17 operations, 15 assistant turns, 1 `announced` push (a stated intention with no tool call), 0 questions. The model tried to edit the deployed copy over ssh (`sed -i`), which the approval driver rejected; it then used the project and `deploy.sh` |
+| C | 0.4.2 terminal, short prompt, **guard off** | done as well: on a simple task this model needed no help, so these runs do not show the guard to be necessary on their own. The deterministic scenarios (`tests/test_scenario_*.py`) are what pin each guard behaviour |
+
+Metrics (runs A, B, E, guard on): duplicate diagnostics that ran with no change in between: 0 (every repeat the ledger shows had a source
+change, a deploy or a compaction between its two runs, which the guard correctly let through); repeated failing commands: 0; unnecessary
+confirmation questions reaching the user: 0 (no `question` tool call and no text-only turn asking permission in any of the runs);
+tool calls before the first source change: 6 (B), 11-12 (A), 16 (E); files changed: 1 (`calc/core.py`); tests run: 1 each, all after
+the last change; completion correct in all of them.
+
+What this does and does not show. It shows that 0.4.2 completes a realistic multi-step ssh, fix, test, deploy task on the real model
+through real compactions, and that the same long directive broke pure 0.4.1 in the way the real sessions did. The window arithmetic,
+the request kept beside the summary and the checkpoint wording (patch 0009) are active in runs A, B, C and E; run C therefore does
+not isolate the guard from them. Qwen3.6 is a capable model; the permission-asking and loop behaviours in the real sessions did not
+recur in these short runs, so they are covered by the scripted scenarios, not by a live reproduction. No second local model was
+loaded for comparison: that would have evicted the loaded model on a shared Spark.
+
+Bugs this acceptance found in the guard itself (all fixed and covered by tests): a compaction request flattens the history into one
+user-role message of transcript text, which was being read as the user's words (and could have widened the scope); a call the user
+declined at an approval prompt was recorded as having run.

@@ -8,6 +8,10 @@ import pytest
 
 from ctrl_c_support import configure, engine_for, unique_marker
 from ptyharness import PtySession
+from test_ctrl_c_tui import TUI
+
+# These drive the real terminal, so they need a Sarness terminal build (CI has none and skips them).
+pytestmark = pytest.mark.skipif(TUI is None, reason="no Sarness terminal (sarness-tui) installed; run `sarness tui install`")
 
 
 @pytest.mark.parametrize("subcommand", [[], ["code"]])
