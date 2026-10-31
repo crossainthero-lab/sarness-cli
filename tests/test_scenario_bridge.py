@@ -135,3 +135,24 @@ def test_the_guard_never_grants_anything_a_tool_result_cannot_create_authority(r
     sb, persona, engine, server, h, final = run_scenario(ask_first=False, compact_at=())
     led = Ledger.open("ses_scenario")
     assert "production" not in str(led.d["objective"]["scope"])
+
+
+def test_a_read_only_request_is_answered_through_the_bridge_without_being_pushed_to_edit(tmp_path, monkeypatch):
+    from test_scenario_native import ReadOnlyPersona
+    sb = Sandbox(tmp_path / "ro")
+    sb.apply_env(monkeypatch)
+    persona = ReadOnlyPersona(str(sb.proj / "calc" / "core.py"))
+    persona.respond_orig = persona.respond
+    persona.respond = lambda messages: [("call", "read", {"path": persona.path})] if persona.n == 0 and not persona.__setattr__("n", 1) \
+        else [("text", "mean() divides by len(values) + 1, so it is a little low. Would you like me to change it?")]
+    server = BridgeServer(ScenarioEngine(persona), [MODEL], mode="ask", workspace=sb.proj)
+    server.start()
+    try:
+        h = BridgeHarness(server, sb, persona, session="ses_readonly", compact_at=(),
+                          task="Explain how calc/core.py computes the mean. Don't change anything.")
+        final = h.run()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "Would you like me to change it?" in final and [n for n, _ in h.executed] == ["read"]
+    assert Ledger.open("ses_readonly").d["interventions"] == [] and sb.local_core() != CORE_FIXED

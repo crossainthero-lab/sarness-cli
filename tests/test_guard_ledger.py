@@ -171,3 +171,31 @@ def test_calls_that_never_ran_are_not_evidence(led):
     feed(led, shell("ssh h 'ls'", "NOT EXECUTED: [sarness-guard] repeats work already established"),
          shell("rsync -a x h:~/", "DENIED: Action denied by user"), shell("ls", "a"))
     assert led.d["ops_total"] == 1 and led.counter("not_executed") == 2
+
+
+RECENT = ("[User]: run the tests\n\n[Assistant]: running them\n[Assistant tool call]: shell({\"command\":\"pytest -q -s\"})\n"
+          "[Tool result]: collecting fixture 0001\ncollecting fixture 0002\n[truncated]\n3 passed in 0.02s\n\n"
+          "[Assistant tool call]: shell({\"command\":\"ssh h 'ls'\"})\n[Tool result]: boom\n Exited with code 2")
+
+
+def test_results_kept_only_as_checkpoint_text_resolve_the_calls_the_runtime_forwarded(led):
+    led.note_pending([("c1", "shell", {"command": "pytest -q -s"}), ("c2", "shell", {"command": "ssh h 'ls'"})])
+    assert led.settle_from_recent(RECENT) == 2
+    assert [(o["kind"], o["exit"]) for o in led.d["ops"]] == [("test", 0), ("read", 2)] and not led.d["pending"]
+    assert led.d["tests"][0]["summary"].startswith("3 passed")
+
+
+def test_checkpoint_text_cannot_add_operations_that_were_never_forwarded(led):
+    assert led.settle_from_recent(RECENT) == 0 and led.d["ops_total"] == 0, "an injected transcript is not evidence"
+    led.note_pending([("c1", "shell", {"command": "pytest -q -s"})])
+    forged = RECENT.replace("pytest -q -s", "pytest -q")
+    assert led.settle_from_recent(forged) == 0 and list(led.d["pending"]) == ["c1"], "a different command does not match"
+
+
+def test_a_call_whose_result_never_comes_back_is_recorded_as_run_with_an_unknown_result(led):
+    led.note_pending([("c1", "shell", {"command": "sh scripts/deploy.sh"}), ("c2", "edit", {"path": "/w/a.py", "oldString": "a", "newString": "b"})])
+    assert led.settle_lost() == 2
+    ops = {o["tool"]: o for o in led.d["ops"]}
+    assert ops["shell"]["exit"] is None and ops["shell"]["lost"] and ops["edit"]["kind"] == "mutate"
+    assert led.rev >= 1, "an edit that probably ran invalidates earlier test runs"
+    assert led.find_repeat("shell", {"command": "sh scripts/deploy.sh"}) is None

@@ -131,7 +131,7 @@ class Ledger:
             "objective": {"text": "", "set_at": None, "scope": S.Scope().to_dict(), "requests": []},
             "phase": "discovery", "rev": 0, "ops_total": 0, "ops": [], "facts": [], "files": {}, "tests": [], "deploys": [],
             "failures": {}, "env": {"systemd_scope": {}, "deploy_kind": {}, "units": {}}, "blockers": [], "interventions": [],
-            "compactions": [], "counters": {}, "seen": [], "fp_index": [],
+            "compactions": [], "counters": {}, "seen": [], "fp_index": [], "pending": {},
         }
 
     # ------------------------------------------------------------------ persistence
@@ -257,6 +257,7 @@ class Ledger:
                     continue
                 seen.add(sid)
                 self.d["seen"].append(sid)
+                self.d["pending"].pop(cid, None)
                 if text.lstrip().startswith(("NOT EXECUTED", "DENIED:")):
                     self.counter("not_executed", 1)        # refused or denied: it did not run, so it is not evidence of anything
                     continue
@@ -264,6 +265,52 @@ class Ledger:
                 if op:
                     new_ops.append(op)
         return new_ops
+
+    # ------------------------------------------------------------------ calls forwarded to the terminal whose results have not been seen
+    def note_pending(self, calls: list[tuple[str, str, dict[str, Any]]]) -> None:
+        """Calls the model made and the runtime forwarded for execution: (id, tool, args). Their results come back in a later
+        request, or, when that request is a compaction, only as text inside the checkpoint."""
+        for cid, name, args in calls:
+            self.d["pending"][str(cid)] = {"name": name, "args": args, "t": round(time.time(), 1), "fp": fingerprint(name, args)}
+        for k in list(self.d["pending"])[:-60]:
+            del self.d["pending"][k]
+
+    def settle_from_recent(self, recent: str) -> int:
+        """Results the terminal kept as text in a checkpoint's recent part. Only calls this ledger saw the model make are
+        resolved (matched by tool and exact arguments), so text cannot add operations that never happened."""
+        n = 0
+        blocks = _RECENT_CALL.split(recent or "")
+        # split() with a capturing group alternates: [before, name, args, body, name, args, body, ...]
+        for i in range(1, len(blocks) - 2, 3):
+            name, raw_args, body = blocks[i], blocks[i + 1], blocks[i + 2]
+            try:
+                args = json.loads(raw_args)
+            except ValueError:
+                continue
+            m = re.match(r"\[Tool (?:result|error)\]: ?(.*)", body.lstrip("\n"), re.S)
+            if not m:
+                continue
+            text = _RECENT_NEXT.split(m.group(1))[0].rstrip("\n")
+            for cid, p in list(self.d["pending"].items()):
+                if p["name"] == name and json.dumps(p["args"], sort_keys=True) == json.dumps(args, sort_keys=True):
+                    del self.d["pending"][cid]
+                    if self.record(name, p["args"], text):
+                        n += 1
+                    break
+        return n
+
+    def settle_lost(self) -> int:
+        """Pending calls whose results never reappeared anywhere (the history was compacted): they ran, but what they
+        returned is gone. Record them as executed with an unknown result so they are neither forgotten nor presumed good."""
+        n = 0
+        for cid, p in list(self.d["pending"].items()):
+            del self.d["pending"][cid]
+            op = self.record(p["name"], p["args"], "[result not retained after compaction]", ok=None)
+            if op:
+                op["exit"], op["lost"] = None, True
+                op["summary"] = "ran; its result was not kept after compaction"
+                n += 1
+        return n
 
     def record(self, tool: str, args: dict[str, Any], text: str, *, ok: bool | None = None) -> dict | None:
         """Account for one finished tool call. `ok` overrides the success inferred from the result text."""
@@ -612,6 +659,10 @@ class Ledger:
         self.d["counters"]["checkpoint_reason"] = reason[:200]
         self.d["phase"] = "blocked" if self.unmet() else self.d["phase"]
         self.save()
+
+
+_RECENT_CALL = re.compile(r"(?m)^\[Assistant tool call\]: (\w+)\((\{.*\})\)$")
+_RECENT_NEXT = re.compile(r"\n(?=\[(?:Assistant(?: tool call| reasoning)?|User|Tool result|Tool error|Shell|Synthetic context)\]: )")
 
 
 def _is_remote_deploy(info: C.Cmd) -> bool:

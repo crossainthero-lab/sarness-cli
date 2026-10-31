@@ -121,3 +121,78 @@ def test_a_model_that_only_asks_is_pushed_a_bounded_number_of_times_and_never_gi
         drive(sess, engine, persona)
     assert sess.status == "blocked:confirmation_loop" and len(engine.calls) == 4
     assert sess.guard.led.d["ops"] == [] and sb.local_core() != CORE_FIXED
+
+
+def test_a_resumed_native_session_continues_from_the_ledger_not_from_scratch(tmp_path, monkeypatch):
+    sb, persona, engine, sess, asked = start(tmp_path, monkeypatch)
+    prompt, done_first = TASK, False
+    for _ in range(60):                                   # run until the tests have passed, then 'close the terminal'
+        try:
+            sess.run(engine, prompt, max_steps=1)
+        except SessionBlocked as exc:
+            assert "Step limit" in str(exc)
+        prompt = None
+        if persona.milestone == "tested" and sess.guard.led.d["tests"]:
+            break
+    sid, ops_before = sess.id, sess.guard.led.d["ops_total"]
+    assert ops_before and sb.local_core() == CORE_FIXED and not sb.restarted()
+    # a new process: the session comes back from disk with the same ledger
+    again = agent.Session.load(sid, tools.Workspace(sb.proj, "bypass", lambda _m: True), make_cfg())
+    assert again.guard.led.d["ops_total"] == ops_before and again.guard.led.objective == TASK
+    final = again.run(engine, None, 0)
+    assert final.startswith("Done.") and sb.remote_core() == CORE_FIXED and sb.restarted()
+    assert again.guard.led.unmet() == []
+    ssh = [o for o in again.guard.led.d["ops"] if o["tool"] == "run_command" and o["host"]]
+    fps = [normalize_command(o["cmd"]) for o in ssh]
+    assert len(fps) == len(set(fps)), "nothing already learned about the server was asked again after the restart"
+
+
+def test_a_deploy_interrupted_by_ctrl_c_is_not_replayed_blindly_after_resume(tmp_path, monkeypatch):
+    sb, persona, engine, sess, asked = start(tmp_path, monkeypatch)
+    real_execute = tools.Workspace.execute
+    state = {"interrupted": False}
+
+    def execute(self, name, args):
+        if name == "run_command" and "deploy.sh" in args.get("command", "") and not state["interrupted"]:
+            state["interrupted"] = True
+            raise KeyboardInterrupt
+        return real_execute(self, name, args)
+
+    monkeypatch.setattr(tools.Workspace, "execute", execute)
+    with pytest.raises(agent.Interrupted):
+        drive(sess, engine, persona, compact_at=())
+    assert sess.status == "interrupted" and not sb.restarted()
+    sid = sess.id
+    again = agent.Session.load(sid, tools.Workspace(sb.proj, "bypass", lambda _m: True), make_cfg())
+    final = again.run(engine, None, 0)
+    led = again.guard.led
+    assert final.startswith("Done.") and sb.remote_core() == CORE_FIXED
+    assert led.interventions("uncertain-replay"), "the interrupted deploy was held back once before it was run again"
+    assert any("interrupted earlier" in str(m.get("content")) for call in engine.calls for m in call if m["role"] in ("user", "tool"))
+
+
+class ReadOnlyPersona:
+    """Reads one file, explains it, and offers to change it. A read-only request must end there."""
+    milestone = ""
+
+    def __init__(self, path):
+        self.path, self.n = path, 0
+
+    def respond(self, messages):
+        self.n += 1
+        if self.n == 1:
+            return [("call", "read_file", {"path": self.path})]
+        return [("text", "mean() sums the values and divides by len(values) + 1, so it is always a little low. "
+                         "Would you like me to change it so it divides by len(values)?")]
+
+
+def test_a_read_only_request_is_answered_and_never_pushed_toward_editing(tmp_path, monkeypatch):
+    sb = Sandbox(tmp_path / "sb")
+    sb.apply_env(monkeypatch)
+    persona = ReadOnlyPersona(str(sb.proj / "calc" / "core.py"))
+    engine = ScenarioEngine(persona)
+    sess = agent.Session(tools.Workspace(sb.proj, "ask", lambda _m: True), make_cfg())
+    final = sess.run(engine, "Explain how calc/core.py computes the mean. Don't change anything.")
+    assert "Would you like me to change it" in final and sess.status == "completed"
+    assert sess.guard.led.d["interventions"] == [] and len(engine.calls) == 2
+    assert sb.local_core() != CORE_FIXED, "nothing was edited"

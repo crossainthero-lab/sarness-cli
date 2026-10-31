@@ -36,6 +36,7 @@ from typing import Any
 from . import __version__, tui
 from .engine import EngineError
 from .guard import Guard, Ledger
+from .guard.core import parse_call
 
 try:                                # POSIX terminals only; elsewhere the launcher simply skips terminal restoration
     import termios
@@ -398,6 +399,9 @@ class _Handler(BaseHTTPRequestHandler):
             if finish in ("length", "error"):
                 break
         done = {**done, "message": {**(done.get("message") or {}), "content": total_text}}
+        if calls:
+            with lock:
+                guard.led.note_pending([(c["id"], c["function"]["name"], parse_call(c)[1]) for c in calls])
         return done, finish, calls
 
     # ------------------------------------------------------------ completion

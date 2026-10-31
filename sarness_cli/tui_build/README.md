@@ -23,7 +23,10 @@ The patches are `git format-patch v2.0.32..sarness` from a checkout of the fork 
 small: every Sarness change is marked with a `SARNESS:` comment. To move to a new upstream release, rebase the
 branch onto the new tag, re-export the patches, update `UPSTREAM`, and re-run the upstream TUI tests.
 
-**Patch 0007 (Ctrl+C) lives on its own branch for now.** It was authored as commit `61773cc` on branch `sarness-ctrlc`
-(a separate worktree, `~/Documents/sarness-tui-src/ctrlc`) because the shared `sarness` checkout had someone else's
-uncommitted work. Before running `git format-patch v2.0.32..sarness`, fast-forward or cherry-pick that commit onto
-`sarness`; otherwise the regenerated series silently drops the Ctrl+C fix (`tests/test_ctrl_c_tui.py` fails if it does).
+**Which branch.** The series is `git format-patch v2.0.32..sarness-0.4.2` from `~/Documents/sarness-tui-src/agentguard`
+(branch `sarness-0.4.2`). That branch is the shared `sarness` branch plus patches 0007 (Ctrl+C, written on branch
+`sarness-ctrlc`) and 0009 to 0012. The shared `sarness` branch in `~/Documents/sarness-tui-src/opencode` does not have
+them: regenerating from it would silently drop the Ctrl+C and compaction fixes (`tests/test_ctrl_c_tui.py` and
+`tests/test_scenario_tui.py` fail if that happens). Bring `sarness-0.4.2` onto `sarness` (fast-forward is not possible:
+0007 and 0008 were committed on different branches) before using `sarness` as the source again. 0001 to 0008 are kept
+byte-identical to the 0.4.1 release; to add a patch, `git format-patch --stdout -1 <commit>` into a new numbered file.

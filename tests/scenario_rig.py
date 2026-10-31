@@ -37,10 +37,12 @@ CORE_BUGGY = "def mean(values):\n    return sum(values) / (len(values) + 1)\n"
 CORE_FIXED = "def mean(values):\n    return sum(values) / len(values)\n"
 TEST_SRC = ("from calc.core import mean\n\n\ndef test_mean():\n    assert mean([2, 4, 6]) == 4\n\n\n"
             "def test_single():\n    assert mean([5]) == 5\n")
+BULK = "".join(f"line {i:04d}: the quick brown fox jumps over the lazy dog while the build farm hums quietly along\n" for i in range(700))
 DEPLOY_SH = textwrap.dedent('''\
     #!/bin/sh
     # deploy the library to the test server: a plain file copy, the server keeps no git checkout
     set -e
+    i=0; while [ $i -lt 500 ]; do echo "uploading chunk $i ........................................................"; i=$((i+1)); done
     rsync -a --delete -e ssh calc/ fylume@testhost:~/app/calc/
     ssh fylume@testhost 'systemctl --user restart app'
     echo "deployed"
@@ -69,6 +71,8 @@ SSH_STUB = textwrap.dedent('''\
     if host != "testhost":
         sys.stderr.write("ssh: Could not resolve hostname %s: Name or service not known\\n" % host)
         sys.exit(255)
+    with open(os.path.join(os.environ["REMOTE_HOME"], ".state", "ssh.log"), "a") as log:
+        log.write(" ".join(cmd) + "\\n")
     if not cmd:
         sys.stderr.write("ssh: interactive sessions are not available here\\n")
         sys.exit(1)
@@ -114,6 +118,9 @@ class Sandbox:
         (self.proj / "calc" / "__init__.py").write_text("")
         (self.proj / "calc" / "core.py").write_text(CORE_BUGGY)
         (self.proj / "tests" / "test_core.py").write_text(TEST_SRC)
+        (self.proj / "tests" / "test_log.py").write_text("def test_verbose_output():\n    for i in range(500):\n"
+                                                         "        print('collecting fixture %04d: ' % i + 'x' * 80)\n")
+        (self.proj / "NOTES.md").write_text("# Operations notes\n\n" + BULK)
         (self.proj / "scripts" / "deploy.sh").write_text(DEPLOY_SH)
         (self.proj / "conftest.py").write_text("")
         (self.remote / "app" / "calc" / "core.py").write_text(CORE_BUGGY)
@@ -138,6 +145,10 @@ class Sandbox:
 
     def remote_core(self) -> str:
         return (self.remote / "app" / "calc" / "core.py").read_text()
+
+    def ssh_calls(self) -> list[str]:
+        f = self.remote / ".state" / "ssh.log"
+        return f.read_text().splitlines() if f.exists() else []
 
     def restarted(self) -> bool:
         return (self.remote / ".state" / "restarted").exists()
@@ -174,8 +185,10 @@ class View:
         self.compacted = any("<conversation-checkpoint>" in u or "Earlier steps were compacted" in u for u in users)
         self.nudged_last = bool(users) and users[-1].startswith("[sarness-guard]")
 
-    def saw(self, needle: str, result: str | None = None) -> bool:
+    def saw(self, needle: str, result: str | None = None, *, shell_only: bool = False) -> bool:
         for name, args, text in self.results:
+            if shell_only and name not in ("shell", "run_command"):
+                continue
             cmd = str(args.get("command") or args.get("path") or "")
             if needle in cmd and (result is None or result in text):
                 return True
@@ -195,7 +208,7 @@ class Persona:
         self.proj = proj
         self.asked = not ask_first
         self.glued = self.doubted = self.double_read = self.tried_system = False
-        self.premature_1 = self.premature_2 = False
+        self.premature_1 = self.premature_2 = self.notes_read = False
         self.stubborn_epochs: set[int] = set()   # one entry per compaction (its checkpoint text is unique)
         self.milestone = ""
         self.log: list[str] = []
@@ -271,6 +284,9 @@ class Persona:
                         todo.append(self.call(self.rd, {"path": f"{self.proj}/tests/test_core.py"}))
                     if not deploy_known:
                         todo.append(self.call(self.rd, {"path": f"{self.proj}/scripts/deploy.sh"}))
+                    if not self.notes_read:
+                        self.notes_read = True                       # the long operations notes: a lot of context
+                        todo.append(self.call(self.rd, {"path": f"{self.proj}/NOTES.md"}))
                     if todo:
                         return todo
             if read_core and not self.double_read:
@@ -288,12 +304,12 @@ class Persona:
         tested = v.noted("(current)") and "exit 0" in v.low_notes or self._test_after_last_edit(v)
         if not tested:
             self.milestone = "tested"
-            return self.call(self.sh, {"command": f"cd {self.proj} && {sys.executable} -m pytest -q -p no:cacheprovider"})
+            return self.call(self.sh, {"command": f"cd {self.proj} && {sys.executable} -m pytest -q -s -p no:cacheprovider"})
         if not self.premature_1 and not (v.noted("Deployments:")):
             self.premature_1 = True
             return self.text("All done! The bug is fixed (mean() now divides by len(values)) and the tests pass. Summary of the work above.")
         # --- deploy
-        deployed = v.noted("Deployments:") or v.saw("deploy.sh", "deployed")
+        deployed = v.noted("Deployments:") or v.saw("deploy.sh", "deployed", shell_only=True)
         if not deployed:
             self.milestone = "deployed"
             return self.call(self.sh, {"command": f"cd {self.proj} && sh scripts/deploy.sh"})

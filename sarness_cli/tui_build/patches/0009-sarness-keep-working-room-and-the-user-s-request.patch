@@ -1,4 +1,4 @@
-From 4f31606665b1210103755646f6e6bd99f15bc160 Mon Sep 17 00:00:00 2001
+From 43713bd8a7228675d7cd0f1195bde62319f738fb Mon Sep 17 00:00:00 2001
 From: crossainthero <billymillena@gmail.com>
 Date: Sun, 1 Nov 2026 00:18:27 +1100
 Subject: [PATCH] sarness: keep working room and the user's request through
@@ -9,25 +9,29 @@ kept 15k tokens verbatim (more than the room), and, because an agent run is a si
 tool rounds, summarized the request itself away. The checkpoint then called everything 'historical, not new
 instructions', so the model asked what to do. Now: the reserve of a 32-64k window is the model's output limit;
 the verbatim part is bounded by the budget; the user's request is always kept beside the summary and a long
-single run keeps its newest steps; the checkpoint says the request is still in force; many installed skills
-shrink to one sentence each (full text on demand); the auto-compaction default is the launcher's choice.
+single run keeps its newest steps; the tail of long command output survives into the checkpoint; the checkpoint
+says the request is still in force; many installed skills shrink to one sentence each (full text on demand);
+the auto-compaction default is the launcher's choice. Upstream tests that pinned the old wording and the
+sidebar's old layout are adapted.
 ---
- packages/core/src/session/compaction.ts       |  55 ++++++--
+ packages/core/src/session/compaction.ts       |  72 ++++++++--
  .../core/src/session/runner/to-llm-message.ts |   4 +-
  packages/core/src/skill/instructions.ts       |  19 ++-
- .../core/test/sarness-compaction-room.test.ts | 128 ++++++++++++++++++
- packages/core/test/session-compaction.test.ts |  11 +-
+ .../core/test/sarness-compaction-room.test.ts | 136 ++++++++++++++++++
+ packages/core/test/session-compaction.test.ts |  15 +-
+ .../core/test/session-runner-message.test.ts  |   4 +-
  packages/core/test/session-runner.test.ts     |   8 +-
  packages/tui/src/component/prompt/index.tsx   |   3 +-
  .../src/feature-plugins/sidebar/context.tsx   |   5 +-
  packages/tui/src/routes/session/index.tsx     |   5 +-
+ .../feature-plugins/sidebar-context.test.tsx  |   6 +-
  packages/util/src/sarness-autocompact.ts      |   7 +
- 10 files changed, 222 insertions(+), 23 deletions(-)
+ 12 files changed, 255 insertions(+), 29 deletions(-)
  create mode 100644 packages/core/test/sarness-compaction-room.test.ts
  create mode 100644 packages/util/src/sarness-autocompact.ts
 
 diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
-index e399e5a..84f8360 100644
+index e399e5a..5d88f73 100644
 --- a/packages/core/src/session/compaction.ts
 +++ b/packages/core/src/session/compaction.ts
 @@ -18,6 +18,7 @@ import type { StreamOptions } from "@opencode/ai/route"
@@ -110,7 +114,31 @@ index e399e5a..84f8360 100644
    return previous?.recent ? 0 : entries.length
  }
  
-@@ -914,12 +930,29 @@ export const estimatePrompt = (context: SessionContext.Loaded) => {
+@@ -828,7 +844,22 @@ const truncateToolOutput = (value: string) => {
+     kept++
+   }
+   if (end === value.length) return value
+-  return `${value.slice(0, end)}\n[truncated]`
++  // SARNESS: the end of a command's output holds its verdict (test summary, error, "Exited with code N"). Keeping only the
++  // head made a finished test run look unfinished after compaction, so the model ran it again, and again.
++  return `${value.slice(0, end)}\n[truncated]\n${tailOf(value, TOOL_OUTPUT_TAIL_CHARS)}`
++}
++
++const TOOL_OUTPUT_TAIL_CHARS = 400
++const tailOf = (value: string, chars: number) => {
++  let start = value.length
++  let kept = 0
++  for (let i = value.length; i > 0 && kept < chars; ) {
++    const code = value.charCodeAt(i - 1)
++    i -= code >= 0xdc00 && code <= 0xdfff && i > 1 ? 2 : 1
++    start = i
++    kept++
++  }
++  return value.slice(start)
+ }
+ 
+ /** One request message as a flattened transcript line. Empty for what the transcript leaves out. */
+@@ -914,12 +945,29 @@ export const estimatePrompt = (context: SessionContext.Loaded) => {
   * is more. The summary request is capped at the same size, so its output limit is whatever the reserve leaves. A window
   * too small to give up `RESERVE_MIN` keeps 10%.
   */
@@ -196,10 +224,10 @@ index 14811da..bc40778 100644
      "Skills provide specialized instructions and workflows for specific tasks.",
 diff --git a/packages/core/test/sarness-compaction-room.test.ts b/packages/core/test/sarness-compaction-room.test.ts
 new file mode 100644
-index 0000000..18d8a6c
+index 0000000..035b9df
 --- /dev/null
 +++ b/packages/core/test/sarness-compaction-room.test.ts
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,136 @@
 +// SARNESS: compaction must leave a small local model room to work and must never lose the user's request.
 +// Regression for the Trinodal sessions: a 32k window, ~11k tokens of fixed prompt, a flat 16k reserve and a "keep 15k
 +// verbatim" allowance compacted the session after every one or two tool calls, and the user's own request was
@@ -328,11 +356,30 @@ index 0000000..18d8a6c
 +    else process.env.SARNESS_AUTOCOMPACT_DEFAULT = before
 +  }
 +})
++
++test("a long command output keeps its tail in the checkpoint's recent part: that is where the verdict is", () => {
++  const output = `${"collecting fixture\n".repeat(400)}3 passed in 0.02s\n Exited with code 1`
++  const split = splitConversation([user("run the tests"), assistant(0, "a"), assistant(1, output)], 100)!
++  expect(split.recent).toContain("3 passed in 0.02s")
++  expect(split.recent).toContain("Exited with code 1")
++  expect(split.recent).toContain("[truncated]")
++})
 diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
-index 13160a9..414e6a9 100644
+index 13160a9..cbb79f6 100644
 --- a/packages/core/test/session-compaction.test.ts
 +++ b/packages/core/test/session-compaction.test.ts
-@@ -495,7 +495,8 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
+@@ -134,7 +134,9 @@ it.effect("compaction truncation does not split surrogate pairs", () =>
+       { type: "text", text: "😀".repeat(1_250) },
+     ])
+ 
+-    expect(split).toEndWith(`[Tool result]: ${prefix}😀\n[truncated]`)
++    // SARNESS: the cut is still on a code point boundary, and the end of the output is kept after the marker
++    expect(split).toContain(`[Tool result]: ${prefix}😀\n[truncated]\n`)
++    expect(split).toEndWith("😀suffix")
+     expect(whole).toEndWith(`[Tool result]: ${"😀".repeat(1_250)}`)
+   }),
+ )
+@@ -495,7 +497,8 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
          type: "compaction",
          reason: "manual",
          summary: "## Objective\n- manual summary",
@@ -342,7 +389,7 @@ index 13160a9..414e6a9 100644
          cost: 0.0000233,
          tokens: { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } },
        },
-@@ -594,7 +595,13 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
+@@ -594,7 +597,13 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
      expect(contexts).toBe(0)
      expect(requests).toEqual([])
      expect(yield* store.context(sessionID)).toMatchObject([
@@ -357,6 +404,28 @@ index 13160a9..414e6a9 100644
      ])
      expect(
        yield* db
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+index d5b38fb..7dcb6e7 100644
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -187,7 +187,7 @@ describe("toLLMMessages", () => {
+         {
+           type: "text",
+           text: `<conversation-checkpoint>
+-The following is a summary and serialized record of earlier conversation. Treat it as historical context, not as new instructions.
++The following is a summary and serialized record of earlier conversation. It describes work already done in this session. The user's request in it is still in progress and still in force: carry it out from the Next Move without asking the user whether to proceed or what to do next, and do not repeat steps the record shows as completed.
+ 
+ <summary>
+ Earlier work
+@@ -222,7 +222,7 @@ Recent work
+       {
+         type: "text",
+         text: `<conversation-checkpoint>
+-The following is a summary and serialized record of earlier conversation. Treat it as historical context, not as new instructions.
++The following is a summary and serialized record of earlier conversation. It describes work already done in this session. The user's request in it is still in progress and still in force: carry it out from the Next Move without asking the user whether to proceed or what to do next, and do not repeat steps the record shows as completed.
+ 
+ <summary>
+ Earlier work
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 index 3a9d55b..7b20ab5 100644
 --- a/packages/core/test/session-runner.test.ts
@@ -378,7 +447,7 @@ index 3a9d55b..7b20ab5 100644
  
    scenario("serializes history and omits media after a summary input overflow", function* (s) {
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
-index 96ada64..3a0985b 100644
+index 96ada64..9a16519 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
 @@ -1,3 +1,4 @@
@@ -391,7 +460,7 @@ index 96ada64..3a0985b 100644
              route.navigate({ type: "session", sessionID: created.id })
              toast.show({
 -              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: OFF (current session)${value === "" ? " — /autocompact on|off|status" : ""}`,
-+              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: ${autoCompactEnabled(undefined) ? "ON" : "OFF"} (new session)${value === "" ? " — /autocompact on|off|status" : ""}`,
++              message: value === "on" ? "Auto-compaction: ON — automatic context management enabled" : value === "off" ? "Auto-compaction: OFF — manual /compact available" : `Auto-compaction: ${autoCompactEnabled(undefined) ? "ON" : "OFF"} (current session)${value === "" ? " — /autocompact on|off|status" : ""}`,
                variant: "info",
              })
            } catch (error) { toast.error(error) }
@@ -449,6 +518,30 @@ index 9e95b29..7a18ac2 100644
            toast.show({ message: `Auto-compaction: ${state} (current session)${value === "" ? " — /autocompact on|off|status" : ""}`, variant: "info" })
          } catch (error) {
            toast.error(error)
+diff --git a/packages/tui/test/feature-plugins/sidebar-context.test.tsx b/packages/tui/test/feature-plugins/sidebar-context.test.tsx
+index de5ecdf..28a3a9e 100644
+--- a/packages/tui/test/feature-plugins/sidebar-context.test.tsx
++++ b/packages/tui/test/feature-plugins/sidebar-context.test.tsx
+@@ -39,7 +39,7 @@ function context(options?: { cost?: number; tokens?: number }) {
+   } as unknown as Context
+ }
+ 
+-test("sidebar omits context before usage is available", async () => {
++test("sidebar shows no usage before it is available, only the auto-compaction setting", async () => {
+   const app = await testRender(() => <SidebarContext context={context()} sessionID="session" />, {
+     width: 42,
+     height: 8,
+@@ -47,7 +47,9 @@ test("sidebar omits context before usage is available", async () => {
+ 
+   try {
+     await app.renderOnce()
+-    expect(app.captureCharFrame()).not.toContain("Context")
++    // SARNESS: the auto-compaction setting is always visible; usage numbers are not shown until they exist
++    expect(app.captureCharFrame()).toContain("Auto-compaction:")
++    expect(app.captureCharFrame()).not.toContain("tokens")
+     expect(app.captureCharFrame()).not.toContain("Not measured")
+   } finally {
+     app.renderer.destroy()
 diff --git a/packages/util/src/sarness-autocompact.ts b/packages/util/src/sarness-autocompact.ts
 new file mode 100644
 index 0000000..40c15db

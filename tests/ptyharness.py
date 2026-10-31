@@ -120,8 +120,13 @@ class PtySession:
         """What the terminal is showing right now, as a person would read it (needs the `pyte` dev dependency)."""
         if pyte is None:
             return self.text
-        screen = pyte.Screen(self.cols, self.rows)
-        pyte.ByteStream(screen).feed(self.raw)
+        if getattr(self, "_emu", None) is None:                # incremental: feed only what arrived since the last look
+            screen = pyte.Screen(self.cols, self.rows)
+            self._emu = (screen, pyte.ByteStream(screen), [0])
+        screen, stream, fed = self._emu
+        if fed[0] < len(self.raw):
+            stream.feed(self.raw[fed[0]:])
+            fed[0] = len(self.raw)
         lines = [line.rstrip() for line in screen.display]
         while lines and not lines[-1]:
             lines.pop()

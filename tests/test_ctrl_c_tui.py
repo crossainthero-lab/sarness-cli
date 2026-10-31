@@ -158,6 +158,22 @@ def test_ctrl_c_cancels_a_generation_and_releases_the_engine_stream(tui):
     assert_clean_exit(session, tui.marker)
 
 
+def test_ctrl_c_pressed_right_after_enter_cancels_the_new_prompt_instead_of_quitting(tui):
+    """Before the server has reported a prompt as running, Ctrl+C used to find nothing to stop and quit the app (or be lost)."""
+    session = tui()
+    server = tui.server
+    session.type("SLOWGEN")
+    session.pump(0.4)
+    session.send("\r")
+    session.ctrl_c()                                                         # no pause: faster than any report from the server
+    assert still_running(session, 2.5), "Ctrl+C right after Enter quit the app"
+    assert session.until(lambda: stream_count(server) == 0, 8), "the new generation was not stopped\n" + session.tail()
+    session.pump(3.0)
+    assert stream_count(server) == 0, "the generation started after the key was handled"
+    session.ctrl_c()
+    assert_clean_exit(session, tui.marker)
+
+
 def test_cancelling_keeps_what_is_being_typed_and_a_further_press_only_clears_it(tui):
     session = generating(tui)
     server = tui.server

@@ -11,12 +11,17 @@ from ptyharness import PtySession
 
 
 @pytest.mark.parametrize("subcommand", [[], ["code"]])
-def test_autocompact_installed_and_resumed(tmp_path, subcommand):
+@pytest.mark.parametrize("default", ["on", "off"])
+def test_autocompact_installed_and_resumed(tmp_path, subcommand, default):
     binary = Path(os.environ.get("SARNESS_TEST_EXECUTABLE", Path.home() / ".local/bin/sarness"))
     if not binary.exists():
         pytest.skip("installed Sarness CLI unavailable")
     server = engine_for("shell", unique_marker("AUTOCOMPACT"))
     configure(server, runtime="tui")
+    from sarness_cli import config
+    cfg = config.load_config()
+    cfg["settings"]["autocompact"] = default            # what a session that never chose starts with
+    config.save_config(cfg)
     work = tmp_path / "work"
     work.mkdir()
     env = dict(os.environ, TERM="xterm-256color", XDG_DATA_HOME=str(tmp_path / "data"),
@@ -51,7 +56,10 @@ def test_autocompact_installed_and_resumed(tmp_path, subcommand):
 
     try:
         p = start()
-        send(p, "/autocompact status", "Auto-compaction: OFF (current session)")
+        send(p, "/autocompact status", f"Auto-compaction: {default.upper()} (current session)")
+        if default == "on":
+            send(p, "/autocompact off", "Auto-compaction: OFF")
+            assert setting().get("sarnessAutoCompact") is False
         send(p, "/autocompact on", "Auto-compaction: ON")
         assert setting().get("sarnessAutoCompact") is True
         send(p, "/autocompact status", "Auto-compaction: ON (current session)")
@@ -98,6 +106,10 @@ def test_installed_runtime_switches_real_compaction(tmp_path):
         yield reply
     server.turns = Dispatch(script)
     configure(server, runtime="tui")
+    from sarness_cli import config
+    cfg = config.load_config()
+    cfg["settings"]["autocompact"] = "off"              # this scenario starts from automatic compaction off
+    config.save_config(cfg)
     work = tmp_path / "work"
     work.mkdir()
     env = dict(os.environ, TERM="xterm-256color", XDG_DATA_HOME=str(tmp_path / "data"), XDG_CACHE_HOME=str(tmp_path / "cache"))

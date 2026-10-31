@@ -91,6 +91,14 @@ class Guard:
         new = led.ingest(messages, workspace=self.workspace)
         if self.checkpoint_present(messages):
             self._note_compaction(messages)
+            # tool rounds the terminal folded into the checkpoint's text were never visible as structured results
+            for m in messages:
+                if m.get("role") == "user" and message_text(m).lstrip().startswith("<conversation-checkpoint>"):
+                    section = message_text(m).split("<recent-context>", 1)
+                    if len(section) == 2:
+                        led.settle_from_recent(section[1].split("</recent-context>", 1)[0])
+            if not self.utility_kind(messages):
+                led.settle_lost()
         if new or real:
             led.save()
         return new
