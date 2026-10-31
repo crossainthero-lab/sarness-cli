@@ -80,6 +80,13 @@ class Tunnel:
         """Start (or restart) the tunnel; returns its local URL. Idempotent when healthy."""
         if self.alive():
             return self.url
+        try:
+            return self._open(interactive)
+        except BaseException:        # Ctrl-C after `ssh -f` detached would leave a master nothing ever closes
+            self.close()
+            raise
+
+    def _open(self, interactive: bool | None) -> str:
         self.close()
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         prune_stale(self.dir)

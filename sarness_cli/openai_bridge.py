@@ -16,15 +16,17 @@ Invariants (each has a regression test in tests/test_openai_bridge.py):
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import secrets
 import select
-import signal
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +35,11 @@ from typing import Any
 
 from . import __version__, tui
 from .engine import EngineError
+
+try:                                # POSIX terminals only; elsewhere the launcher simply skips terminal restoration
+    import termios
+except ImportError:                 # pragma: no cover
+    termios = None                  # type: ignore[assignment]
 
 MAX_BODY = 32 * 1024 * 1024
 STREAM_RETRIES = 2                  # extra attempts while nothing has been sent to the client
@@ -500,18 +507,72 @@ def opencode_command(binary: str, workspace: Path, mode: str, args: list[str] | 
     return cmd
 
 
-def run_foreground(cmd: list[str], **kw: Any) -> int:
+# What a full-screen program leaves behind if it dies without cleaning up: alternate screen, mouse reporting,
+# bracketed paste, the kitty keyboard protocol and a hidden cursor.
+TERMINAL_RESET = (b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?2031l"
+                  b"\x1b[<u\x1b[>4;0m\x1b[0m\x1b[?25h")
+
+
+def restore_terminal(saved: Any | None) -> None:
+    """Put the controlling terminal back the way the launcher found it (used when the terminal program crashed)."""
+    try:
+        if saved is not None and termios is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+        if sys.stdout.isatty():
+            sys.stdout.buffer.write(TERMINAL_RESET)
+            sys.stdout.buffer.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def run_foreground(cmd: list[str], *, stop_grace: float = 5.0, **kw: Any) -> int:
     """Run the terminal as the foreground program. Ctrl+C belongs to it (cancel a turn, clear input, exit): the
-    launcher must not die on SIGINT, because subprocess.call would then kill the terminal mid-session."""
-    # A handler, not SIG_IGN: an ignored disposition would be inherited by the terminal and every command it runs.
-    previous = (signal.signal(signal.SIGINT, lambda *_: None)
-                if threading.current_thread() is threading.main_thread() else None)
+    launcher must not die on SIGINT, because subprocess.call would then kill the terminal mid-session.
+
+    SIGTERM and SIGHUP (closing the window, `kill`) are forwarded to the terminal program, which is the only
+    process signalled; it gets `stop_grace` seconds to leave cleanly before it, and only it, is killed. If it dies
+    abnormally the terminal modes it set are reset, so the user's shell is not left raw."""
+    in_main = threading.current_thread() is threading.main_thread()
+    child: dict[str, Any] = {}
+    stopping: dict[str, float] = {}
+
+    def forward(signum: int, _frame: Any) -> None:
+        proc = child.get("proc")
+        if proc is not None and proc.poll() is None:
+            stopping.setdefault("since", time.monotonic())
+            with contextlib.suppress(OSError):
+                proc.send_signal(signum)
+
+    saved = None
+    if termios is not None and sys.stdin.isatty():
+        with contextlib.suppress(OSError, termios.error):
+            saved = termios.tcgetattr(sys.stdin.fileno())
+    previous: dict[int, Any] = {}
+    if in_main:
+        # A handler, not SIG_IGN: an ignored disposition would be inherited by the terminal and every command it runs.
+        previous[signal.SIGINT] = signal.signal(signal.SIGINT, lambda *_: None)
+        previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, forward)
+        previous[signal.SIGHUP] = signal.signal(signal.SIGHUP, forward)
     try:
         proc = subprocess.Popen(cmd, **kw)
-        return proc.wait()
+        child["proc"] = proc
+        while True:
+            try:
+                code = proc.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if "since" in stopping and time.monotonic() - stopping["since"] > stop_grace:
+                    proc.kill()
+                    stopping["since"] = float("inf")
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGINT, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if code < 0:                                  # killed by a signal: report it the way a shell does
+        restore_terminal(saved)
+        return 128 + -code
+    if code >= 128 or "since" in stopping:
+        restore_terminal(saved)
+    return code
 
 
 def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, workspace: Path, *,

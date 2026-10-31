@@ -1,0 +1,217 @@
+From 61773cc61ec22048ca025e777a652d27ef234fd3 Mon Sep 17 00:00:00 2001
+From: crossainthero <billymillena@gmail.com>
+Date: Sat, 31 Oct 2026 19:38:29 +1100
+Subject: [PATCH] sarness: Ctrl+C cancels, clears or exits on the first press,
+ including while the app starts
+
+Until the app's keymap mounted nothing read Ctrl+C, yet the terminal was already raw (no SIGINT), so a press during
+startup was lost; the renderer's own exit-on-Ctrl+C is now on until the app takes over. While a turn or a `!` command
+runs, Ctrl+C cancels it (session interrupt, owned process group killed SIGTERM then SIGKILL after 3 s) and stays at the
+prompt, ahead of the input's clear and the app's exit. Escape stays the deliberate two-step interrupt.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ packages/tui/src/app.tsx                    |  9 +++-
+ packages/tui/src/component/prompt/index.tsx | 60 +++++++++++++++++++--
+ packages/tui/src/config/keybind.ts          |  1 +
+ packages/tui/test/mini/runtime.boot.test.ts |  1 +
+ packages/tui/test/sarness-ctrl-c.test.ts    | 29 ++++++++++
+ 5 files changed, 96 insertions(+), 4 deletions(-)
+ create mode 100644 packages/tui/test/sarness-ctrl-c.test.ts
+
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index ef04289..737217c 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -241,7 +241,9 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+         externalOutputMode: "passthrough",
+         targetFps: 60,
+         gatherStats: false,
+-        exitOnCtrlC: false,
++        // Until the app's own keymap is mounted nothing else reads Ctrl+C, and the terminal is already raw (no
++        // SIGINT), so the renderer itself must treat it as "exit". App turns this off once it handles the key.
++        exitOnCtrlC: true,
+         useKittyKeyboard: {},
+         autoFocus: false,
+         openConsoleOnError: false,
+@@ -1311,6 +1313,11 @@ function App() {
+     },
+     bindings: ["app.exit"],
+   }))
++  // From here on Ctrl+C goes through the keymap (cancel, clear, close, exit); see the renderer option above.
++  onMount(() => {
++    // The renderer reads this at key time but only declares it as a config option, not a public field.
++    ;(renderer as unknown as { exitOnCtrlC: boolean }).exitOnCtrlC = false
++  })
+ 
+   event.on("tui.command.execute", (evt, { directory }) => {
+     if (directory !== (location.current?.directory ?? data.location.default().directory)) return
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index b8198b6..0bffee9 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -100,6 +100,20 @@ export type PromptRef = {
+ const DRAFT_RETENTION_MIN_CHARS = 20
+ const revealedPromptMetadata = new WeakSet<object>()
+ 
++// `!` commands the user started from the composer and that have not settled yet, per session. A `!` command runs
++// outside the agent turn, so Ctrl+C needs to know about it to cancel it instead of leaving the app.
++const [userShellsInFlight, setUserShellsInFlight] = createSignal<Readonly<Record<string, readonly string[]>>>({})
++function trackUserShell(sessionID: string, command: string) {
++  setUserShellsInFlight((all) => ({ ...all, [sessionID]: [...(all[sessionID] ?? []), command] }))
++  return () =>
++    setUserShellsInFlight((all) => {
++      const list = [...(all[sessionID] ?? [])]
++      const index = list.indexOf(command)
++      if (index >= 0) list.splice(index, 1)
++      return { ...all, [sessionID]: list }
++    })
++}
++
+ function randomIndex(count: number) {
+   if (count <= 0) return 0
+   return Math.floor(Math.random() * count)
+@@ -136,9 +150,9 @@ export function PromptInterruptStatus(props: {
+ 
+   return (
+     <text fg={props.armed ? armedColor() : props.text} wrapMode="none" truncate flexShrink={1}>
+-      esc{" "}
++      {props.armed ? "esc" : "ctrl+c"}{" "}
+       <span style={{ fg: props.armed ? armedColor() : props.subdued }}>
+-        {props.armed ? "again to interrupt" : "interrupt"}
++        {props.armed ? "again to interrupt" : "cancel"}
+       </span>
+     </text>
+   )
+@@ -209,6 +223,7 @@ export function Prompt(props: PromptProps) {
+   const dialog = useDialog()
+   const toast = useToast()
+   const status = createMemo(() => data.session.status(props.sessionID ?? ""))
++  const userShells = createMemo(() => userShellsInFlight()[props.sessionID ?? ""] ?? [])
+   const history = usePromptHistory()
+   const stash = usePromptStash()
+   const keymap = Keymap.use()
+@@ -528,6 +543,35 @@ export function Prompt(props: PromptProps) {
+           dialog.clear()
+         },
+       },
++      {
++        // Ctrl+C is "stop what is running" first, "clear" second and "exit" last, and the first press always does
++        // the first applicable one. Escape stays the deliberate two-step interrupt.
++        title: "Cancel the running task",
++        name: "session.cancel",
++        category: "Session",
++        palette: undefined,
++        enabled: (status() === "running" || userShells().length > 0) && !!props.sessionID,
++        run: () => {
++          const sessionID = props.sessionID
++          if (!sessionID) return false
++          setStore("interrupt", 0)
++          if (store.mode === "shell" && store.prompt.text === "") setStore("mode", "normal")
++          if (status() === "running") void client.api.session.interrupt({ sessionID, resume: false })
++          // Only the commands this composer started: a background server the agent launched keeps running.
++          const owned = userShells()
++          for (const shell of data.shell.listBySession(sessionID)) {
++            if (shell.status !== "running" || !owned.includes(shell.command)) continue
++            void client.api.shell.remove({ id: shell.id, location: { directory: shell.location.directory } })
++          }
++          toast.show({
++            title: "Cancelled",
++            message: "Stopped the running task. Your session is saved. Press Ctrl+C again to exit.",
++            variant: "info",
++            duration: 4000,
++          })
++          dialog.clear()
++        },
++      },
+       {
+         title: "Background blocking tools",
+         name: "session.background",
+@@ -667,6 +711,13 @@ export function Prompt(props: PromptProps) {
+     ],
+   }))
+ 
++  // Above the input's own Ctrl+C (clear) and the app's (exit): while work is running the first press cancels it.
++  Keymap.createLayer(() => ({
++    priority: 2,
++    enabled: !disabled(),
++    bindings: ["session.cancel"],
++  }))
++
+   const ref: PromptRef = {
+     get focused() {
+       return !disabled() && input.focused
+@@ -1306,7 +1357,10 @@ export function Prompt(props: PromptProps) {
+     history.append(entry)
+     if (currentMode === "shell") {
+       move.startSubmit()
+-      const send = () => client.api.session.shell({ sessionID: target, command: inputText })
++      const send = () => {
++        const settled = trackUserShell(target, inputText)
++        return client.api.session.shell({ sessionID: target, command: inputText }).finally(settled)
++      }
+       void (newSession ? newSession.gate.then(send).catch(newSession.recover) : send())
+       setStore("mode", "normal")
+     } else if (slashHead && isCommand) {
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+index ef1cba9..929e9fd 100644
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -126,6 +126,7 @@ export const Definitions = {
+   "session.share": keybind("none", "Deprecated: session sharing was removed"),
+   "session.unshare": keybind("none", "Deprecated: session sharing was removed"),
+   "session.interrupt": keybind("escape", "Interrupt current session"),
++  "session.cancel": keybind("ctrl+c", "Cancel the running task"),
+   "session.background": keybind("ctrl+b", "Background blocking session tools"),
+   "session.compact": keybind("<leader>c", "Compact the session"),
+   "session.aside": keybind("none", "Ask a side question"),
+diff --git a/packages/tui/test/mini/runtime.boot.test.ts b/packages/tui/test/mini/runtime.boot.test.ts
+index 9870036..932dafe 100644
+--- a/packages/tui/test/mini/runtime.boot.test.ts
++++ b/packages/tui/test/mini/runtime.boot.test.ts
+@@ -17,6 +17,7 @@ describe("run runtime boot", () => {
+     expect(result.keybinds.get("command.palette.show")?.[0]?.key).toBe("ctrl+p")
+     expect(result.keybinds.get("variant.cycle")?.[0]?.key).toBe("ctrl+t")
+     expect(result.keybinds.get("session.interrupt")?.[0]?.key).toBe("escape")
++    expect(result.keybinds.get("session.cancel")?.[0]?.key).toBe("ctrl+c")
+     expect(result.keybinds.get("prompt.history.previous")?.[0]?.key).toBe("up")
+     expect(result.keybinds.get("prompt.history.next")?.[0]?.key).toBe("down")
+     expect(result.keybinds.get("prompt.clear")?.[0]?.key).toBe("ctrl+c")
+diff --git a/packages/tui/test/sarness-ctrl-c.test.ts b/packages/tui/test/sarness-ctrl-c.test.ts
+new file mode 100644
+index 0000000..4924a07
+--- /dev/null
++++ b/packages/tui/test/sarness-ctrl-c.test.ts
+@@ -0,0 +1,29 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import { TuiKeybind } from "../src/config/keybind"
++
++// Sarness: one Ctrl+C always has one visible effect (cancel what runs, else clear, else exit), including while the
++// app is still starting. The behaviour is exercised end to end through a real pseudo-terminal by the Sarness CLI's
++// own test suite (tests/test_ctrl_c_tui.py); these keep the wiring from being lost in an upstream rebase.
++const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8")
++
++describe("sarness Ctrl+C", () => {
++  test("session.cancel is bound to ctrl+c next to the deliberate escape interrupt", () => {
++    expect(TuiKeybind.Definitions["session.cancel"].default).toBe("ctrl+c")
++    expect(TuiKeybind.Definitions["session.interrupt"].default).toBe("escape")
++  })
++
++  test("the renderer exits on Ctrl+C until the app's keymap takes over (the terminal is raw, so no SIGINT arrives)", () => {
++    const app = source("../src/app.tsx")
++    expect(app).toContain("exitOnCtrlC: true")
++    expect(app).toMatch(/onMount\(\(\) => \{[\s\S]{0,300}?exitOnCtrlC: boolean[\s\S]{0,40}?exitOnCtrlC = false/)
++  })
++
++  test("cancelling outranks the input's clear and the app's exit, and covers the user's own `!` commands", () => {
++    const prompt = source("../src/component/prompt/index.tsx")
++    expect(prompt).toMatch(/priority: 2,\s*enabled: !disabled\(\),\s*bindings: \["session.cancel"\]/)
++    expect(prompt).toContain('name: "session.cancel"')
++    expect(prompt).toContain("resume: false")
++    expect(prompt).toContain("trackUserShell(target, inputText)")
++  })
++})
+-- 
+2.53.0
+

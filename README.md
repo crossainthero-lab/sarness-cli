@@ -78,8 +78,8 @@ sarness sessions | server | upgrade | --version
 ```
 
 The Python runtime's slash commands: `/help /cabinet /model /effort /thinking /permissions /status /plan /diff /compact /clear /resume /rename /exit`.
-**Enter** sends, **Alt+Enter** (or Esc,Enter, or a trailing ``) inserts a newline, **Ctrl-C** cancels the running task (state is saved),
-**Ctrl-D** quits. Large pasted prompts are automatically collapsed into compact `▸ Pasted text` indicators (expand/edit with **Ctrl-E**).
+**Enter** sends, **Alt+Enter** (or Esc,Enter, or a trailing ``) inserts a newline, **Ctrl-C** cancels the running task (state is saved); at the prompt it clears the line, and on an empty line it quits
+(**Ctrl-D** quits too). Large pasted prompts are automatically collapsed into compact `▸ Pasted text` indicators (expand/edit with **Ctrl-E**).
 The live bottom status bar shows: `Model · Effort · Server ● · RAM Used/Total · Permission Mode`.
 
 ## Models

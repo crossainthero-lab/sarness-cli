@@ -82,6 +82,46 @@ TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 MUTATING = {"write_file", "append_file", "edit_file", "delete_path", "move_path"}
 
 
+
+def _group_gone(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def terminate_group(proc: "subprocess.Popen[Any]", signals: tuple[tuple[int, float], ...] = (
+        (signal.SIGINT, 1.5), (signal.SIGTERM, 3.0), (signal.SIGKILL, 5.0))) -> None:
+    """Stop the process group Sarness started for a command: each signal in turn, with a bounded wait before the
+    next, so a command gets the chance to clean up but can never keep the user waiting. Only the group this
+    process created (`start_new_session`) is signalled, never another process by name. A second Ctrl-C while
+    waiting skips straight to SIGKILL of that same group."""
+    pgid = proc.pid
+    escalate_now = False
+    for sig, grace in signals:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, sig)
+        deadline = time.monotonic() + (0 if escalate_now else grace)
+        try:
+            while time.monotonic() < deadline:
+                proc.poll()
+                if _group_gone(pgid):
+                    break
+                time.sleep(0.03)
+        except KeyboardInterrupt:
+            escalate_now = True
+        proc.poll()
+        if _group_gone(pgid):
+            break
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)       # anything the earlier signals left behind in our own group
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=5)
+
+
 class ToolArgError(ValueError):
     pass
 
@@ -558,14 +598,10 @@ class Workspace:
                             over_cap = True
                         else:
                             continue
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
+                        terminate_group(proc, ((signal.SIGTERM, 3.0), (signal.SIGKILL, 5.0)))
                         break
             except BaseException:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
+                terminate_group(proc)       # Ctrl-C (or any error): SIGINT, then SIGTERM, then SIGKILL, each bounded
                 raise
             size = logf.tell()
             logf.seek(0)

@@ -65,9 +65,9 @@ Session Management
 
 General
   /help                      Show this help reference
-  /exit                      Quit Sarness CLI (Ctrl-D also exits)
+  /exit                      Quit Sarness CLI (Ctrl-C on an empty line or Ctrl-D also exit)
 
-Navigation: Enter = send; Esc+Enter or \\+Enter = newline; Ctrl-C = cancel task / clear line.
+Navigation: Enter = send; Esc+Enter or \\+Enter = newline; Ctrl-C = cancel the running task; at the prompt it clears the line, and on an empty line it quits.
 """
 
 SLASH_COMMANDS = [
@@ -293,6 +293,16 @@ class Repl:
             else:
                 event.current_buffer.insert_text(data)
 
+        @kb.add("c-c")
+        def _ctrl_c(event):  # noqa: ANN001
+            """Ctrl-C at the prompt: clear what is typed; on an empty line, quit. One press always does one of them."""
+            buf = event.current_buffer
+            if buf.text:
+                buf.cancel_completion()
+                buf.reset()
+            else:
+                event.app.exit(exception=EOFError, style="class:exiting")
+
         @kb.add("c-e")
         @kb.add("escape", "e")
         def _expand(event):  # noqa: ANN001
@@ -412,11 +422,8 @@ class Repl:
                 return expanded.strip()
             raw = input("\nsarness ❯ ").strip()
             return self.paste_mgr.expand(raw).strip()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):   # Ctrl-D, or Ctrl-C where there is no line editor: quit
             return None
-        except KeyboardInterrupt:
-            self.con.err(self.con.st.dim("(Ctrl-C clears the line; Ctrl-D or /exit quits)"))
-            return ""
 
     # ------------------------------------------------------------------ main loop
     def run(self) -> int:

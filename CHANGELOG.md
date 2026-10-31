@@ -1,10 +1,48 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 - 2026-10-31
+
+One Ctrl+C now has one visible, immediate effect everywhere: it cancels what is running, otherwise clears the line,
+otherwise exits. No more pressing it two or three times.
 
 ### Fixed
+- **Ctrl+C was dropped during startup.** The Sarness terminal switches the terminal to raw mode (so the kernel stops
+  turning Ctrl+C into SIGINT) about half a second after launch, but its keymap only mounted 0.5-1 s later (longer on a
+  big project), and nothing read the key in between: a press in that window vanished and had to be repeated. The
+  renderer's own exit-on-Ctrl+C now stays on until the app's keymap takes over (patch 0007).
+- **Ctrl+C could not stop a running turn.** In the terminal, cancelling was only Escape pressed twice; Ctrl+C either
+  cleared the composer (so a press with text in it did nothing to the task) or quit the whole app. It now cancels the
+  running turn (Engine stream released), the agent's shell command, or a `!` command you started, and stays at the
+  prompt with a "Cancelled" notice. Text you were typing is kept. Escape keeps its deliberate two-step interrupt.
+  Pressing Ctrl+C again then clears the line, and on an empty idle prompt it exits.
+- **`sarness native` never exited on Ctrl+C** at an empty prompt (only a hint was printed; it needed Ctrl-D or
+  `/exit`). Ctrl+C now clears typed text, and on an empty line quits.
+- **Commands were SIGKILLed with no chance to clean up** when interrupted in `sarness native`. The command's own
+  process group (and only that group) now gets SIGINT, then SIGTERM, then SIGKILL, each after a bounded wait
+  (1.5 s / 3 s / 5 s); a second Ctrl+C skips the waiting. The terminal's shell tool already did SIGTERM then SIGKILL
+  after 3 s.
+- The launcher now forwards SIGTERM/SIGHUP to the terminal it started (and kills only that child after 5 s if it will
+  not leave), reports a signal death as `128+n`, and resets the alternate screen, mouse, keyboard and cursor modes
+  if the terminal program dies without cleaning up, so the user's shell is not left raw.
+- A Ctrl+C that landed after `ssh -f` had detached the tunnel master could leave that master running; opening a
+  tunnel now closes it on any interruption.
 - `sarness tui install` of the build that is already current pointed `previous` at itself, losing the rollback
-  target. `previous` now only moves when the build changes.
+  target. `previous` now only moves when the build changes (PR #7).
+
+### Tests
+- Real-keyboard regression tests: a pseudo-terminal sends the actual 0x03 byte once and checks the visible effect,
+  the Engine's active stream count (the fake engine now tracks it), that the owned command is gone, that unrelated
+  processes survive, that no process outlives the session, and that the terminal is restored
+  (`tests/test_ctrl_c_native.py`, `test_ctrl_c_launcher.py`, and `test_ctrl_c_tui.py`, which runs where a
+  `sarness-tui` binary is installed). On 0.4.0 the terminal tests fail on the startup window and on cancelling.
+
+### Known limits
+- Prompt processing cannot be aborted. The Engine only sends response headers once the first token exists, so a
+  cancel during a long prefill closes the connection at once but the engine's stream is released when prefill ends
+  (the next write fails), not mid-prefill.
+- SSH: Sarness only starts the tunnel (a port forward, no remote command). If the agent runs `ssh host cmd`, Ctrl+C
+  stops that local `ssh` client and nothing else; a remote command started without a tty may keep running until it
+  next writes. Sarness never kills remote processes.
 
 ## 0.4.0 - 2026-10-31
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sarness-cli"
-version = "0.4.0"
+version = "0.4.1"
 description = "Terminal coding agent for Sarness Engine"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -22,7 +22,7 @@ sarness_cli = ["tui_build/build.sh", "tui_build/UPSTREAM", "tui_build/README.md"
 
 [project.optional-dependencies]
 keyring = ["secretstorage>=3.3"]
-dev = ["pytest>=8", "cryptography", "ruff"]
+dev = ["pytest>=8", "cryptography", "ruff", "pyte>=0.8"]
 
 [tool.ruff.lint]
 select = ["E9", "F63", "F7", "F82"]
