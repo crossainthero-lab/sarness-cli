@@ -27,5 +27,5 @@ with the defects found in review and live testing fixed.
   shell's directory).
 
 ### Rollback
-`pipx install --force 'git+https://github.com/crossainthero-lab/sarness-cli@v0.2.4'` (or `pip install` the 0.2.4
+`pipx install --force 'git+https://github.com/crossainthero-lab/sarness-cli@03d2d25'` (the 0.2.4 release commit; or install the 0.2.4
 wheel). Config and native sessions are unchanged by 0.3.0; the only new setting (`runtime`) is ignored by 0.2.x.
