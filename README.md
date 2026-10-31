@@ -251,6 +251,10 @@ terminal.
   everything.
 * **Sarness commands:** `/cabinet` opens the model cabinet (the terminal pauses while it runs). `/upgrade` points to
   `sarness upgrade`. `/connect` explains that models come only from Sarness Engine.
+* **Context:** `/autocompact on`, `/autocompact off`, and `/autocompact status` control automatic
+  compaction for the current session. New sessions default to off and the choice survives resume and restart.
+  `/compact` remains available for manual compaction. When automatic compaction is off, the context indicator
+  warns as the reported model limit approaches; an unknown limit cannot be used for automatic compaction.
 * Only the loaded model is offered, with its live ctx/gpu_layers pinned: the bridge never reloads or swaps a model
   behind other users. Ctrl+C belongs to the terminal (the launcher does not die on it).
 

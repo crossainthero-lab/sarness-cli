@@ -11,7 +11,7 @@ import pytest
 
 from sarness_cli.engine import EngineError
 from sarness_cli.openai_bridge import (BridgeServer, opencode_command, opencode_config, opencode_env,
-                                       opencode_major, opencode_permission)
+                                       opencode_major, opencode_permission, model_context)
 
 MODEL = {"ref": "local:qwen-test", "name": "Qwen test", "local": True,
          "reasoning": True, "context_max": 262144, "default_ctx": 32768, "supported": True}
@@ -91,6 +91,27 @@ def chat(stream=False, **kw):
 
 
 # ------------------------------------------------------------------ configuration
+def test_context_uses_live_local_limit_without_fictitious_fallback():
+    assert model_context(MODEL, {**LIVE, "ctx": 32768}) == 32768
+    with pytest.raises(ValueError, match="did not report"):
+        model_context(MODEL, {**LIVE, "ctx": None})
+    assert model_context({"ref": "remote:unknown", "local": False}, None) == 0
+
+
+def test_bridge_rejects_changed_live_context():
+    engine = FakeBridgeEngine()
+    server = serve(engine, live=LIVE)
+    engine.live["ctx"] = 32768
+    try:
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(server, "/chat/completions", chat())
+        assert error.value.code == 409
+        assert "restart Sarness" in error.value.read().decode()
+        assert not engine.calls
+    finally:
+        server.shutdown()
+        server.server_close()
+
 def test_config_uses_v2_providers_schema_and_the_loaded_context():
     cfg = opencode_config("http://127.0.0.1:9922/v1", [MODEL], MODEL["ref"], "k", live=LIVE)
     provider = cfg["providers"]["sarness"]

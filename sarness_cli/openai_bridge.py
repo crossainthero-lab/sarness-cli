@@ -54,10 +54,12 @@ def output_limit(ctx: int) -> int:
 
 
 def model_context(model: dict[str, Any], live: dict[str, Any] | None) -> int:
-    """The context the engine will actually serve: the loaded ctx for the loaded local model, else the default."""
-    if live and model.get("local") and f"local:{live.get('model_id')}" == model.get("ref") and live.get("ctx"):
-        return int(live["ctx"])
-    return max(2048, int(model.get("default_ctx") or model.get("context_max") or 32768))
+    """Use the loaded model's actual context, never a guessed local capacity."""
+    if model.get("local"):
+        if live and f"local:{live.get('model_id')}" == model.get("ref") and int(live.get("ctx") or 0) > 0:
+            return int(live["ctx"])
+        raise ValueError(f"The engine did not report the loaded context limit for {model.get('ref')}")
+    return int(model.get("default_ctx") or model.get("context_max") or 0)
 
 
 def display_name(model: dict[str, Any]) -> str:
@@ -161,9 +163,10 @@ class BridgeServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, engine: Any, models: list[dict[str, Any]], *, effort: str = "medium",
-                 retries: int = STREAM_RETRIES):
+                 retries: int = STREAM_RETRIES, live: dict[str, Any] | None = None):
         self.engine = engine
         self.models = {str(m["ref"]): m for m in models if m.get("ref") and m.get("supported") is not False}
+        self.expected_live_context = int(live.get("ctx") or 0) if live else None
         self.key = secrets.token_urlsafe(32)
         self.effort = effort
         self.retries = retries
@@ -274,6 +277,8 @@ class _Handler(BaseHTTPRequestHandler):
             if live.get("state") != "ready" or f"local:{live.get('model_id')}" != model:
                 return self._error(409, "The selected model is no longer loaded on the engine; load it again "
                                         "(sarness cabinet) - the bridge never swaps models implicitly", "model_not_loaded")
+            if self.server.expected_live_context is not None and int(live.get("ctx") or 0) != self.server.expected_live_context:
+                return self._error(409, "The loaded model context changed or is unavailable; restart Sarness to refresh its context limit", "model_context_changed")
             if live.get("ctx"):
                 params["ctx"] = int(live["ctx"])
             if live.get("gpu_layers") is not None:
@@ -585,7 +590,7 @@ def launch_opencode(engine: Any, models: list[dict[str, Any]], selected: str, wo
     version = subprocess.check_output([binary, "--version"], text=True, timeout=20).strip()
     opencode_major(version)
     workspace = workspace.resolve()
-    bridge = BridgeServer(engine, models, effort=effort)
+    bridge = BridgeServer(engine, models, effort=effort, live=live)
     bridge.start()
     try:
         cfg = opencode_config(bridge.url, models, selected, bridge.key, live=live, permission=opencode_permission(mode),
